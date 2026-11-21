@@ -230,7 +230,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v6 · 21-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v6</span></div>
+  <div class="brand" title="Escenario v7 · 21-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v7</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -2037,6 +2037,98 @@ return { DemucsProcessor, CONSTANTS };
 
 </script>
 <script>
+/* ===== MDX-Net (UVR karaoke) inference helpers: STFT n_fft=5120, hop=1024, dim_f=2048, dim_t=256 ===== */
+const MDX = (() => {
+  const N = 5120, H = 1024, F = 2048, T = 256, CHUNK = H * (T - 1), TRIM = N / 2, GEN = CHUNK - 2 * TRIM;
+  const win = new Float64Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N); // periodic Hann
+  // radix-2 in-place FFT for 1024
+  const M = 1024, LOG = 10, rev = new Uint16Array(M);
+  for (let i = 0; i < M; i++){ let r = 0, x = i; for (let b = 0; b < LOG; b++){ r = (r << 1) | (x & 1); x >>= 1; } rev[i] = r; }
+  const cM = new Float64Array(M / 2), sM = new Float64Array(M / 2);
+  for (let k = 0; k < M / 2; k++){ cM[k] = Math.cos(-2 * Math.PI * k / M); sM[k] = Math.sin(-2 * Math.PI * k / M); }
+  function fft1024(re, im){
+    for (let i = 0; i < M; i++){ const j = rev[i]; if (j > i){ let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let size = 2; size <= M; size <<= 1){
+      const half = size >> 1, step = M / size;
+      for (let i = 0; i < M; i += size) for (let j = 0; j < half; j++){
+        const k = j * step, a = i + j, b = a + half;
+        const tr = re[b] * cM[k] - im[b] * sM[k], ti = re[b] * sM[k] + im[b] * cM[k];
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+      }
+    }
+  }
+  // 5120-point FFT = radix-5 over five 1024-point FFTs
+  const cN = new Float64Array(N), sN = new Float64Array(N);
+  for (let k = 0; k < N; k++){ cN[k] = Math.cos(-2 * Math.PI * k / N); sN[k] = Math.sin(-2 * Math.PI * k / N); }
+  const subR = Array.from({length:5}, () => new Float64Array(M)), subI = Array.from({length:5}, () => new Float64Array(M));
+  function fft5120(re, im, outR, outI){
+    for (let r = 0; r < 5; r++){ const R = subR[r], I = subI[r]; for (let m = 0; m < M; m++){ R[m] = re[5*m + r]; I[m] = im[5*m + r]; } fft1024(R, I); }
+    for (let k = 0; k < N; k++){
+      const km = k & (M - 1); let sr = 0, si = 0;
+      for (let r = 0; r < 5; r++){ const idx = (r * k) % N, wr = cN[idx], wi = sN[idx], a = subR[r][km], b = subI[r][km]; sr += a * wr - b * wi; si += a * wi + b * wr; }
+      outR[k] = sr; outI[k] = si;
+    }
+  }
+  const fr = new Float64Array(N), fi = new Float64Array(N), or = new Float64Array(N), oi = new Float64Array(N);
+  // stereo chunk (length CHUNK each) → model input [1,4,F,T]: ch0 re, ch0 im, ch1 re, ch1 im
+  function stft(L, R){
+    const out = new Float32Array(4 * F * T), pad = new Float64Array(CHUNK + N);
+    [L, R].forEach((x, ch) => {
+      for (let i = 0; i < CHUNK + N; i++){ let j = i - N / 2; if (j < 0) j = -j; if (j >= CHUNK) j = 2 * (CHUNK - 1) - j; pad[i] = x[j]; } // reflect
+      for (let t = 0; t < T; t++){
+        const o = t * H; for (let n = 0; n < N; n++){ fr[n] = pad[o + n] * win[n]; fi[n] = 0; }
+        fft5120(fr, fi, or, oi);
+        const bR = (ch * 2) * F * T, bI = (ch * 2 + 1) * F * T;
+        for (let f = 0; f < F; f++){ out[bR + f * T + t] = or[f]; out[bI + f * T + t] = oi[f]; }
+      }
+    });
+    return out;
+  }
+  // model output [1,4,F,T] → stereo chunk
+  function istft(spec){
+    const res = [new Float32Array(CHUNK), new Float32Array(CHUNK)];
+    const ola = new Float64Array(CHUNK + N), ws = new Float64Array(CHUNK + N);
+    for (let ch = 0; ch < 2; ch++){
+      ola.fill(0); ws.fill(0);
+      const bR = (ch * 2) * F * T, bI = (ch * 2 + 1) * F * T;
+      for (let t = 0; t < T; t++){
+        fr.fill(0); fi.fill(0);
+        for (let f = 0; f < F; f++){ fr[f] = spec[bR + f * T + t]; fi[f] = -spec[bI + f * T + t]; } // conj for inverse via forward FFT
+        for (let f = 1; f < F; f++){ fr[N - f] = spec[bR + f * T + t]; fi[N - f] = spec[bI + f * T + t]; } // hermitian mirror (conj of conj)
+        fft5120(fr, fi, or, oi);
+        const o = t * H; for (let n = 0; n < N; n++){ const v = or[n] / N; ola[o + n] += v * win[n]; ws[o + n] += win[n] * win[n]; }
+      }
+      const r = res[ch]; for (let i = 0; i < CHUNK; i++){ const w = ws[i + N / 2]; r[i] = w > 1e-10 ? ola[i + N / 2] / w : 0; }
+    }
+    return res;
+  }
+  // yield to the event loop without the 1 s throttling browsers apply to setTimeout in background tabs
+  const yieldNow = () => new Promise(r => { const c = new MessageChannel(); c.port1.onmessage = () => { c.port1.close(); r(); }; c.port2.postMessage(0); });
+  // full separation: returns the model's primary stem (for KARA_2: everything except the lead voice)
+  async function separate(session, ort, L, R, onProgress, compensate = 1.035){
+    const n = L.length, padN = GEN - (n % GEN);
+    const total = n + padN, outL = new Float32Array(n), outR = new Float32Array(n);
+    const get = (x, i) => { const j = i - TRIM; return j >= 0 && j < n ? x[j] : 0; };
+    const cL = new Float32Array(CHUNK), cR = new Float32Array(CHUNK);
+    const steps = total / GEN;
+    for (let s = 0, k = 0; s < total; s += GEN, k++){
+      for (let i = 0; i < CHUNK; i++){ cL[i] = get(L, s + i); cR[i] = get(R, s + i); }
+      const input = stft(cL, cR);
+      const feeds = {}; feeds[session.inputNames[0]] = new ort.Tensor('float32', input, [1, 4, F, T]);
+      const res = await session.run(feeds);
+      const y = istft(res[session.outputNames[0]].data);
+      for (let i = 0; i < GEN; i++){ const p = s + i; if (p < n){ outL[p] = y[0][i + TRIM] * compensate; outR[p] = y[1][i + TRIM] * compensate; } }
+      onProgress && onProgress((k + 1) / steps);
+      await yieldNow();
+    }
+    return {left: outL, right: outR};
+  }
+  return {N, H, F, T, CHUNK, TRIM, GEN, stft, istft, separate, fft5120};
+})();
+if (typeof module !== 'undefined') module.exports = MDX;
+
+</script>
+<script>
 // ===== Chord engine: parse, transpose, render-model =====
 const NOTES_SHARP = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const NOTES_FLAT  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
@@ -2611,7 +2703,7 @@ const DB = {
 /* ================= State ================= */
 const S = {
   songs: new Map(), setlist: [], curId: null,
-  settings: { theme:'auto', fontSize:24, notation:'orig', chordColor:null, lyricColor:null, aiLang:'spanish', aiQuality:'small', fadeSec:6, autoFade:false, latencyMs:null, micCh:'mix', micDev:'', footer:true },
+  settings: { theme:'auto', fontSize:24, notation:'orig', chordColor:null, lyricColor:null, aiLang:'spanish', aiQuality:'small', aiBacking:true, fadeSec:6, autoFade:false, latencyMs:null, micCh:'mix', micDev:'', footer:true },
   scrollMode:'auto', speed:1, userOffset:0, nudge:0, lastSet:null, fading:false
 };
 function saveSettings(){ DB.kvSet('settings', S.settings); }
@@ -2685,7 +2777,7 @@ function pitched(assetId, semis, onProgress){
 function prunePitchCache(){
   const keep = new Set();
   for (const d of DECKS) if (d.song && d.song.track && d.song.track.type === 'file'){
-    const ids = d.song.stems ? [d.song.stems.inst, d.song.stems.voc] : [d.song.track.assetId];
+    const ids = d.song.stems ? [d.song.stems.inst, d.song.stems.voc, d.song.stems.back].filter(Boolean) : [d.song.track.assetId];
     for (const id of ids) keep.add(id + '|' + (d.song.transpose||0));
   }
   for (const k of pitchedCache.keys()) if (!keep.has(k)) pitchedCache.delete(k);
@@ -2726,8 +2818,10 @@ class Deck {
     this.el.innerHTML = `
       <div class="row"><span class="role"></span><span class="grow"></span><span class="chip st hidden"></span></div>
       <div class="title">—</div>
-      <div class="vox hidden"><button class="vbtn" title="Silenciar / activar la voz original (tecla V)">🎤 Voz</button>
-        <input type="range" class="vvol grow" min="0" max="1" step="0.01" title="Volumen de la voz original"><span class="muted vlab"></span></div>
+      <div class="vox hidden"><button class="vbtn" title="Silenciar / activar la voz principal (tecla V)">🎤 Voz</button>
+        <input type="range" class="vvol grow" min="0" max="1" step="0.01" title="Volumen de la voz principal"><span class="muted vlab"></span></div>
+      <div class="vox bvox hidden"><button class="bbtn" title="Silenciar / activar los coros (tecla C)">👥 Coros</button>
+        <input type="range" class="bvol grow" min="0" max="1.2" step="0.01" title="Volumen de los coros"><span class="muted blab"></span></div>
       <div class="ytwrap hidden"><div class="yt"><div></div></div></div>
       <div class="bar" title="Clic para saltar"><i></i><b class="m1 hidden"></b><b class="m2 hidden"></b></div>
       <div class="row">
@@ -2739,7 +2833,8 @@ class Deck {
       </div>`;
     this.$ = {role:$('.role',this.el), st:$('.st',this.el), title:$('.title',this.el), ytwrap:$('.ytwrap',this.el), yt:$('.yt',this.el),
       bar:$('.bar',this.el), prog:$('.bar i',this.el), m1:$('.m1',this.el), m2:$('.m2',this.el), play:$('.play',this.el), stop:$('.stop',this.el), vol:$('.vol',this.el), time:$('.time',this.el),
-      vox:$('.vox',this.el), vbtn:$('.vbtn',this.el), vvol:$('.vvol',this.el), vlab:$('.vlab',this.el)};
+      vox:$('.vox',this.el), vbtn:$('.vbtn',this.el), vvol:$('.vvol',this.el), vlab:$('.vlab',this.el),
+      bvox:$('.bvox',this.el), bbtn:$('.bbtn',this.el), bvol:$('.bvol',this.el), blab:$('.blab',this.el)};
     this.$.play.onclick = () => this.toggle();
     this.$.stop.onclick = () => { this.pause(); this.seek(0); };
     this.$.vol.oninput = () => { this.vol = +this.$.vol.value; this.applyLevel(); };
@@ -2747,6 +2842,9 @@ class Deck {
     this.$.vbtn.onclick = () => this.toggleVoice();
     this.$.vvol.oninput = () => { if (!this.song) return; this.song.voiceVol = +this.$.vvol.value; this.song.voiceMuted = false; this.applyVoice(); };
     this.$.vvol.onchange = () => this.song && saveSong(this.song);
+    this.$.bbtn.onclick = () => this.toggleBacking();
+    this.$.bvol.oninput = () => { if (!this.song) return; this.song.backVol = +this.$.bvol.value; this.song.backMuted = false; this.applyVoice(); };
+    this.$.bvol.onchange = () => this.song && saveSong(this.song);
   }
   get isCur(){ return DECK_CUR() === this; }
   get hasStems(){ return !!(this.song && this.song.stems && this.kind === 'file'); }
@@ -2763,12 +2861,15 @@ class Deck {
   }
   setStatus(s, warn){ this.status = s; this.$.st.textContent = s; this.$.st.classList.toggle('hidden', !s); this.$.st.classList.toggle('warn', !!warn); }
   voiceGain(){ const s = this.song; return !s || s.voiceMuted ? 0 : (s.voiceVol ?? 1); }
+  backGain(){ const s = this.song; return !s || s.backMuted ? 0 : (s.backVol ?? 1); }
+  roleGain(role){ return role === 'voc' ? this.voiceGain() : role === 'back' ? this.backGain() : 1; }
+  get hasBacking(){ return this.hasStems && !!this.song.stems.back; }
   applyVoice(){
-    const v = this.voiceGain();
-    for (const o of this.srcs) if (o.voc) o.g.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+    for (const o of this.srcs) if (o.role !== 'inst') o.g.gain.setTargetAtTime(this.roleGain(o.role), ctx.currentTime, 0.03);
     this.renderVox();
   }
   toggleVoice(){ if (!this.hasStems) return; this.song.voiceMuted = !this.song.voiceMuted; this.applyVoice(); saveSong(this.song); }
+  toggleBacking(){ if (!this.hasBacking) return; this.song.backMuted = !this.song.backMuted; this.applyVoice(); saveSong(this.song); }
   renderVox(){
     const on = this.hasStems;
     this.$.vox.classList.toggle('hidden', !on);
@@ -2777,7 +2878,11 @@ class Deck {
     this.$.vbtn.className = 'vbtn ' + (muted ? 'off' : 'on');
     this.$.vbtn.textContent = muted ? '🔇 Sin voz' : '🎤 Voz';
     this.$.vvol.value = this.song.voiceVol ?? 1;
-    this.$.vlab.textContent = muted ? 'solo pista' : Math.round((this.song.voiceVol ?? 1) * 100) + '%';
+    this.$.vlab.textContent = muted ? 'apagada' : Math.round((this.song.voiceVol ?? 1) * 100) + '%';
+    const hb = this.hasBacking; this.$.bvox.classList.toggle('hidden', !hb);
+    if (hb){ const bm = this.song.backMuted;
+      this.$.bbtn.className = 'bbtn ' + (bm ? 'off' : 'on'); this.$.bbtn.textContent = bm ? '👥 Sin coros' : '👥 Coros';
+      this.$.bvol.value = this.song.backVol ?? 1; this.$.blab.textContent = bm ? 'apagados' : Math.round((this.song.backVol ?? 1) * 100) + '%'; }
   }
   async load(song){
     const tok = ++this.token;
@@ -2803,13 +2908,14 @@ class Deck {
   }
   async loadPitch(tok){
     const semis = this.song.transpose || 0, st = this.song.stems;
-    const ids = st ? [st.inst, st.voc] : [this.song.track.assetId];
+    const ids = st ? [st.inst, st.voc, st.back].filter(Boolean) : [this.song.track.assetId];
+    const roles = st ? ['inst', 'voc', 'back'].filter((r, i) => [st.inst, st.voc, st.back][i]) : ['inst'];
     const prog = ids.map(() => 0);
     if (semis) this.setStatus('Ajustando tono… 0%');
     const bufs = await Promise.all(ids.map((id, i) => pitched(id, semis, p => { prog[i] = p; if (tok === this.token) this.setStatus('Ajustando tono… ' + Math.round(prog.reduce((a, b) => a + b, 0) / ids.length * 100) + '%'); })));
     if (tok !== this.token) return;
     const wasPlaying = this.playing, t = this.time;
-    this.bufs = bufs.map((b, i) => ({buf:b, voc: !!st && i === 1})); this.buf = bufs[0];
+    this.bufs = bufs.map((b, i) => ({buf:b, role: roles[i]})); this.buf = bufs[0];
     this.setStatus(semis ? 'Pista ' + (semis > 0 ? '+' : '') + semis + ' semitonos' : '');
     if (wasPlaying){ this.startAt(t, true); }
     this.renderVox(); this.render(); renderMarks(this);
@@ -2845,13 +2951,13 @@ class Deck {
     audio(); this.ensureOut();
     const old = this.srcs, now = ctx.currentTime, when = now + 0.03;
     const off = clamp(t, 0, Math.max(0, this.buf.duration - 0.05));
-    const news = this.bufs.map(({buf, voc}) => {
+    const news = this.bufs.map(({buf, role}) => {
       const s = ctx.createBufferSource(); s.buffer = buf;
-      const g = ctx.createGain(), v = voc ? this.voiceGain() : 1;
+      const g = ctx.createGain(), v = this.roleGain(role), voc = role === 'voc';
       g.gain.setValueAtTime(xfade ? 0 : v, now);
       if (xfade) g.gain.linearRampToValueAtTime(v, when + 0.04);
       s.connect(g).connect(this.out); s.start(when, off);
-      return {s, g, voc};
+      return {s, g, voc, role};
     });
     news[0].s.onended = () => { if (this.srcs === news && this.playing && this.time >= this.buf.duration - 0.2) { this.playing = false; this.offset = this.buf.duration; this.onEnded(); this.render(); } };
     this.srcs = news; this.offset = off; this.startCtx = when; this.playing = true;
@@ -3412,7 +3518,7 @@ async function deleteSong(id){
   const s = S.songs.get(id);
   S.songs.delete(id); await DB.del('songs', id);
   if (s && s.track && s.track.assetId && ![...S.songs.values()].some(x => x.track && x.track.assetId === s.track.assetId)) await DB.del('assets', s.track.assetId);
-  if (s && s.stems){ await DB.del('assets', s.stems.inst); await DB.del('assets', s.stems.voc); }
+  if (s && s.stems){ for (const a of [s.stems.inst, s.stems.voc, s.stems.back].filter(Boolean)) await DB.del('assets', a); }
   S.setlist = S.setlist.filter(x => x !== id); saveSetlist();
   for (const d of DECKS) if (d.song && d.song.id === id) await d.load(null);
   if (S.curId === id){ S.curId = S.setlist[0] || null; await setCurrent(S.curId); }
@@ -3423,7 +3529,7 @@ async function exportBackup(withAudio){
   const data = {app:'escenario', version:1, exported:new Date().toISOString(), songs:[...S.songs.values()], setlist:S.setlist, assets:[]};
   if (withAudio){
     const ids = new Set([...S.songs.values()].filter(s => s.track && s.track.assetId).map(s => s.track.assetId));
-    for (const s of S.songs.values()) if (s.stems){ ids.add(s.stems.inst); ids.add(s.stems.voc); }
+    for (const s of S.songs.values()) if (s.stems){ for (const a of [s.stems.inst, s.stems.voc, s.stems.back].filter(Boolean)) ids.add(a); }
     PADS.forEach(p => p.assetId && ids.add(p.assetId)); data.pads = PADS;
     for (const id of ids){ const a = await DB.get('assets', id); if (a) data.assets.push({id, name:a.name, type:a.type, data: await blobToDataURL(a.blob)}); }
   }
@@ -3474,6 +3580,7 @@ function openEditor(song){
             <div class="row muted" style="font-size:12px">Idioma
               <select id="eLang" style="font-size:12px;padding:3px"><option value="spanish">Español</option><option value="english">Inglés</option><option value="portuguese">Portugués</option><option value="auto">Automático</option></select>
               <span id="eAIinfo"></span></div>
+            ${s.stems && !s.stems.back ? '<div class="row"><button id="eBack" style="font-size:12px">👥 Separar coros de la voz principal (sin repetir el análisis, ~1 min)</button></div>' : ''}
             ${s.rawBackup ? '<div class="row"><button id="eRestore" class="ghost" style="font-size:12px">↶ Recuperar la otra versión del texto (antes/después del análisis)</button></div>' : ''}
           </div>
         </div>
@@ -3547,6 +3654,7 @@ function openEditor(song){
                  : 'Sin letra: se transcribirá del audio. ') + 'Tarda unos minutos; puedes seguir usando la app.';
   };
   q('#eAI').onchange = aiInfo; aiInfo(); q('#eRaw').addEventListener('input', aiInfo);
+  if (q('#eBack')) q('#eBack').onclick = () => { Analyzer.enqueue(s.id, 'bv'); q('#eBack').disabled = true; q('#eBack').textContent = '👥 Separando coros… (sigue el progreso arriba)'; };
   if (q('#eRestore')) q('#eRestore').onclick = () => { const cur = q('#eRaw').value; q('#eRaw').value = s.rawBackup; s.rawBackup = cur; refresh(); toast('Versión cambiada (guarda para conservarla).'); };
   q('#eCancel').onclick = m.close;
   q('#epPlay').onclick = () => P.toggle();
@@ -3587,7 +3695,7 @@ function openEditor(song){
     const runAI = t === 'file' && q('#eAI').checked;
     if (runAI && S.settings.aiLang !== q('#eLang').value){ S.settings.aiLang = q('#eLang').value; saveSettings(); }
     if (trackChanged){ s.scrollStart = null; s.scrollEnd = null;
-      if (s.stems){ for (const a of [s.stems.inst, s.stems.voc]){ DB.del('assets', a); decodedCache.delete(a); } s.stems = null; } }
+      if (s.stems){ for (const a of [s.stems.inst, s.stems.voc, s.stems.back].filter(Boolean)){ DB.del('assets', a); decodedCache.delete(a); } s.stems = null; } }
     if (oldTrack && oldTrack.assetId && trackChanged && ![...S.songs.values()].some(x => x.id !== s.id && x.track && x.track.assetId === oldTrack.assetId)) { DB.del('assets', oldTrack.assetId); decodedCache.delete(oldTrack.assetId); }
     let syncMsg = null;
     if (!runAI && !trackChanged && s.analysis && (s.analysis.words || []).length && raw.trim() && song && song.raw !== raw && !/\{time\s*:/i.test(raw)){
@@ -3893,6 +4001,7 @@ function padConfig(i, anchor){
 
 /* ================= Automatic analysis: voice separation, chords, lyrics ================= */
 const AI_URLS = {
+  kara: ['https://huggingface.co/masszhou/mdxnet/resolve/main/UVR_MDXNET_KARA_2.onnx', 'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR_MDXNET_KARA_2.onnx'],
   ort: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/ort.webgpu.min.mjs',
   demucs: 'https://huggingface.co/timcsy/demucs-web-onnx/resolve/main/htdemucs_embedded.onnx',
   transformers: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2',
@@ -3949,6 +4058,19 @@ const AI = {
     await p.loadModel(model);
     this.demucs = p; return p;
   },
+  async ensureOrt(){ if (!this.ort){ this.ort = await import(AI_URLS.ort); try { this.ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1; } catch(e){} } return this.ort; },
+  async loadKara(onProg){
+    if (this.kara) return this.kara;
+    const ort = await this.ensureOrt();
+    let model = null, err = null;
+    for (const u of AI_URLS.kara){ try { model = await cachedFetch(u, onProg); break; } catch(e){ err = e; } }
+    if (!model) throw err || new Error('No se pudo descargar el modelo de coros');
+    const gpu = await this.gpuInfo();
+    const session = await ort.InferenceSession.create(model, {executionProviders: gpu.ok ? ['webgpu','wasm'] : ['wasm'], graphOptimizationLevel:'basic'});
+    // KARA_2's primary output is "everything but the lead voice": applied to the vocal stem, that is the backing vocals
+    this.kara = { separate: (L, R, p) => MDX.separate(session, ort, L, R, p, 1.035) };
+    return this.kara;
+  },
   async loadWhisper(quality, onProg){
     const key = quality;
     if (this.asr && this.asrKey === key) return this.asr;
@@ -3968,7 +4090,7 @@ const friendlyErr = e => { const m = String(e && e.message || e); return /fetch|
 const HALLU = /amara\.org|subt[ií]tulos|gracias por ver|suscr[ií]bete|thanks for watching|^\W*$/i;
 
 /* ---- job panel ---- */
-const STEPS = [['prep','Preparar audio'],['dl1','Descargar modelo de voz (solo la 1.ª vez)'],['sep','Separar la voz de la pista'],['save','Guardar pistas separadas'],['chords','Detectar acordes'],['dl2','Descargar modelo de letra (solo la 1.ª vez)'],['lyr','Transcribir la letra'],['asm','Armar la canción']];
+const STEPS = [['prep','Preparar audio'],['dl1','Descargar modelo de voz (solo la 1.ª vez)'],['sep','Separar la voz de la pista'],['bv','Separar coros de la voz principal'],['save','Guardar pistas separadas'],['chords','Detectar acordes'],['dl2','Descargar modelo de letra (solo la 1.ª vez)'],['lyr','Transcribir la letra'],['asm','Armar la canción']];
 function jobPanel(title){
   let host = $('#jobs'); if (!host){ host = document.createElement('div'); host.id = 'jobs'; document.body.appendChild(host); }
   const el = document.createElement('div'); el.className = 'job';
@@ -4092,13 +4214,40 @@ function alignUserLyrics(song, words, chords){
 
 const Analyzer = {
   queue: [], running: null,
-  isBusy(id){ return this.running === id || this.queue.includes(id); },
-  enqueue(id){ if (this.isBusy(id)) return; this.queue.push(id); renderLyricsIfCur(id); this.pump(); },
+  isBusy(id){ return this.running === id || this.queue.some(q => q.id === id); },
+  enqueue(id, mode = 'full'){ if (this.isBusy(id)) return; this.queue.push({id, mode}); renderLyricsIfCur(id); this.pump(); },
   async pump(){
     if (this.running || !this.queue.length) return;
-    const id = this.queue.shift(); this.running = id;
-    try { await this.run(id); } catch(e){ console.error(e); }
+    const {id, mode} = this.queue.shift(); this.running = id;
+    try { await (mode === 'bv' ? this.runBacking(id) : this.run(id)); } catch(e){ console.error(e); }
     this.running = null; renderLyricsIfCur(id); this.pump();
+  },
+  async runBacking(id){
+    const song = S.songs.get(id); if (!song || !song.stems || !song.stems.voc) return;
+    const J = jobPanel(song.title + ' · coros');
+    for (const k of ['prep','dl1','sep','chords','dl2','lyr','asm']) J.mark(k, 'skip');
+    try {
+      J.step('bv', 0); J.msg('Descargando modelo de coros (53 MB, solo la 1.ª vez)…');
+      const a = await DB.get('assets', song.stems.voc); if (!a) throw new Error('No se encontró la pista de voz');
+      const vb = await decodeAt(a.blob, 44100), vl = vb.getChannelData(0), vr = vb.numberOfChannels > 1 ? vb.getChannelData(1) : vl;
+      const kara = await (window.__AI_MOCK && window.__AI_MOCK.kara ? window.__AI_MOCK.kara() : AI.loadKara(p => J.step('bv', p * 0.15)));
+      J.msg(''); const t0 = performance.now();
+      const back = await kara.separate(vl, vr, p => { J.step('bv', 0.15 + p * 0.85); const el = (performance.now() - t0) / 1000; if (p > 0.03) J.msg('Faltan aprox. ' + fmtT(el / p - el)); });
+      if (J.cancelled){ J.finish('Cancelado.', true); return; }
+      const n = vl.length, ll = new Float32Array(n), lr = new Float32Array(n);
+      for (let i = 0; i < n; i++){ ll[i] = vl[i] - back.left[i]; lr[i] = vr[i] - back.right[i]; }
+      J.step('save'); J.msg('');
+      const base = song.title.replace(/[^\w\- ]+/g, '').slice(0, 40) || 'cancion';
+      const leadId = await storeAsset(new File([encodeWavStereo(ll, lr, 44100)], base + ' (voz principal).wav', {type:'audio/wav'}));
+      const backId = await storeAsset(new File([encodeWavStereo(back.left, back.right, 44100)], base + ' (coros).wav', {type:'audio/wav'}));
+      const fresh = S.songs.get(id) || song, oldVoc = fresh.stems.voc, oldBack = fresh.stems.back;
+      fresh.stems = {...fresh.stems, voc: leadId, back: backId};
+      for (const x of [oldVoc, oldBack].filter(Boolean)){ DB.del('assets', x); decodedCache.delete(x); }
+      await saveSong(fresh);
+      for (const d of DECKS) if (d.song && d.song.id === id){ if (!d.playing) await d.load(fresh); else { d.song = fresh; toast('Los coros separados se activarán cuando detengas la pista.'); } }
+      J.mark('save', 'done');
+      J.finish('Listo: ahora puedes apagar la voz principal (V) y dejar los coros (C), o al revés.', true);
+    } catch(e){ console.error(e); J.mark('bv', 'err'); J.finish('Error: ' + friendlyErr(e), false); }
   },
   async run(id){
     const song = S.songs.get(id); if (!song || !song.track || song.track.type !== 'file') return;
@@ -4123,6 +4272,22 @@ const Analyzer = {
         if (e.message === '__cancel') throw e;
         console.warn('Separación falló', e); J.mark('dl1', 'skip'); J.mark('sep', 'err', 'no disponible'); notes.push('No se pudo separar la voz (' + friendlyErr(e) + '); se usó la mezcla completa.');
       }
+      // 1b) lead vs backing vocals (karaoke model on the vocal stem)
+      let lead = null, back = null;
+      if (parts && S.settings.aiBacking !== false){
+        try {
+          J.step('bv', 0); J.msg('Descargando modelo de coros (53 MB, solo la 1.ª vez)…');
+          const kara = await (window.__AI_MOCK && window.__AI_MOCK.kara ? window.__AI_MOCK.kara() : AI.loadKara(p => J.step('bv', p * 0.15))); check();
+          J.msg(''); const t0 = performance.now();
+          back = await kara.separate(parts.vocals.left, parts.vocals.right, p => { J.step('bv', 0.15 + p * 0.85); const el = (performance.now() - t0) / 1000; if (p > 0.03) J.msg('Faltan aprox. ' + fmtT(el / p - el)); });
+          check(); J.msg('');
+          const n = L.length; lead = {left: new Float32Array(n), right: new Float32Array(n)};
+          for (let i = 0; i < n; i++){ lead.left[i] = parts.vocals.left[i] - back.left[i]; lead.right[i] = parts.vocals.right[i] - back.right[i]; }
+        } catch(e){
+          if (e.message === '__cancel') throw e;
+          console.warn('Separación de coros falló', e); J.mark('bv', 'err', 'no disponible'); lead = null; back = null; J.msg('');
+        }
+      } else J.mark('bv', 'skip');
       // 2) save stems
       if (parts){
         J.step('save');
@@ -4130,9 +4295,11 @@ const Analyzer = {
         for (const k of ['drums','bass','other']){ const p = parts[k]; for (let i = 0; i < n; i++){ iL[i] += p.left[i]; iR[i] += p.right[i]; } }
         const base = song.title.replace(/[^\w\- ]+/g, '').slice(0, 40) || 'cancion';
         const instId = await storeAsset(new File([encodeWavStereo(iL, iR, 44100)], base + ' (pista).wav', {type:'audio/wav'}));
-        const vocId = await storeAsset(new File([encodeWavStereo(parts.vocals.left, parts.vocals.right, 44100)], base + ' (voz).wav', {type:'audio/wav'}));
-        const old = song.stems; song.stems = {inst: instId, voc: vocId};
-        if (old){ for (const a of [old.inst, old.voc]){ DB.del('assets', a); decodedCache.delete(a); } }
+        const v = lead || parts.vocals;
+        const vocId = await storeAsset(new File([encodeWavStereo(v.left, v.right, 44100)], base + (lead ? ' (voz principal).wav' : ' (voz).wav'), {type:'audio/wav'}));
+        const backId = back ? await storeAsset(new File([encodeWavStereo(back.left, back.right, 44100)], base + ' (coros).wav', {type:'audio/wav'})) : null;
+        const old = song.stems; song.stems = backId ? {inst: instId, voc: vocId, back: backId} : {inst: instId, voc: vocId};
+        if (old){ for (const a of [old.inst, old.voc, old.back].filter(Boolean)){ DB.del('assets', a); decodedCache.delete(a); } }
         await saveSong(song);
       } else J.mark('save', 'skip');
       check();
@@ -4148,7 +4315,8 @@ const Analyzer = {
       try {
         J.step('dl2', 0); const asr = await (window.__AI_MOCK ? window.__AI_MOCK.whisper() : AI.loadWhisper(S.settings.aiQuality, p => J.step('dl2', p))); check();
         J.step('lyr', 0);
-        const vocMono = await resampleMono(parts ? [parts.vocals.left, parts.vocals.right] : [L, R], 44100, 16000);
+        const vsrc = lead || (parts && parts.vocals);
+        const vocMono = await resampleMono(vsrc ? [vsrc.left, vsrc.right] : [L, R], 44100, 16000);
         const phrases = AN_vocalPhrases(vocMono, 16000, parts ? {} : {rel:0.3});
         const lang = S.settings.aiLang;
         let wordMode = true;
@@ -4221,6 +4389,7 @@ function openSettings(){
         <span>Color de acordes</span><div class="row"><input type="color" id="sChord"><button id="sChordR" class="ghost">Predeterminado</button></div>
         <span>Color de letra</span><div class="row"><input type="color" id="sLyric"><button id="sLyricR" class="ghost">Predeterminado</button></div>
         <span>Idioma de las letras</span><select id="sLang"><option value="spanish">Español</option><option value="english">Inglés</option><option value="portuguese">Portugués</option><option value="auto">Detectar automáticamente</option></select>
+        <span>Separar coros</span><label class="row"><input type="checkbox" id="sBack"> Separar los coros de la voz principal al analizar (descarga 53 MB una vez)</label>
         <span>Precisión de la letra</span><select id="sQual"><option value="small">Precisa (descarga ~400–600 MB una vez)</option><option value="base">Rápida (descarga ~200 MB una vez)</option></select>
         <span class="hint">El análisis automático (voz, letra y acordes) corre en tu computadora; los modelos se descargan la primera vez y quedan guardados.</span>
         <span>Modelos descargados</span><div class="row"><button id="sClearModels">Borrar modelos guardados</button><span class="muted" id="sModelsInfo"></span></div>
@@ -4236,9 +4405,9 @@ function openSettings(){
         <kbd>1–4</kbd><span>Looper: grabar / cerrar loop / superponer en la pista 1–4 · <kbd>Mayús</kbd>+<kbd>1–4</kbd> silenciar</span>
         <kbd>Q W E R</kbd><span>Pads 1–4 · <kbd>A S D F</kbd> pads 5–8</span>
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
-        <kbd>V</kbd><span>Silenciar / activar la voz original (canciones analizadas)</span>
+        <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v6</b> (21-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v7</b> (21-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
@@ -4252,7 +4421,8 @@ function openSettings(){
   q('#sLyric').oninput = e => { st.lyricColor = e.target.value; applyColors(); saveSettings(); };
   q('#sChordR').onclick = () => { st.chordColor = null; applyColors(); saveSettings(); q('#sChord').value = toHex(getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()); };
   q('#sLyricR').onclick = () => { st.lyricColor = null; applyColors(); saveSettings(); q('#sLyric').value = toHex(getComputedStyle(document.documentElement).getPropertyValue('--text').trim()); };
-  q('#sLang').value = st.aiLang; q('#sQual').value = st.aiQuality;
+  q('#sLang').value = st.aiLang; q('#sQual').value = st.aiQuality; q('#sBack').checked = st.aiBacking !== false;
+  q('#sBack').onchange = e => { st.aiBacking = e.target.checked; saveSettings(); };
   q('#sLang').onchange = e => { st.aiLang = e.target.value; saveSettings(); };
   q('#sQual').onchange = e => { st.aiQuality = e.target.value; saveSettings(); };
   const info = async () => { try { if (navigator.storage && navigator.storage.estimate){ const e = await navigator.storage.estimate(); q('#sModelsInfo').textContent = 'Espacio usado por la app: ' + (e.usage/1e6).toFixed(0) + ' MB'; } } catch(e){} };
@@ -4319,6 +4489,7 @@ document.addEventListener('keydown', e => {
   else if (/^Digit[1-4]$/.test(e.code)){ e.preventDefault(); const i = +e.code.slice(5) - 1; if (e.shiftKey) trackMute(i); else trackPress(i); }
   else if (k === 'Escape'){ stopAllPads(); stopAllLoops(); }
   else if (k === 'v' || k === 'V'){ const d = DECK_CUR(); if (d.hasStems) d.toggleVoice(); else toast('Esta canción no tiene la voz separada. Analízala desde ✎ Editar.'); }
+  else if (k === 'c' || k === 'C'){ const d = DECK_CUR(); if (d.hasBacking) d.toggleBacking(); else toast(d.hasStems ? 'Separa los coros desde ✎ Editar.' : 'Esta canción no tiene la voz separada. Analízala desde ✎ Editar.'); }
   else { const i = PAD_KEYS.indexOf(k.toLowerCase()); if (i >= 0 && !e.repeat) padDown(i); }
 });
 document.addEventListener('keyup', e => { const i = PAD_KEYS.indexOf((e.key||'').toLowerCase()); if (i >= 0) padUp(i); });
