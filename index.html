@@ -230,7 +230,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand"><span class="dot"></span>Escenario</div>
+  <div class="brand" title="Escenario v6 · 21-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v6</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -3540,7 +3540,9 @@ function openEditor(song){
   q('#eAI').checked = !!(s.track && s.track.type === 'file' && !s.stems && !(s.raw || '').trim());
   const aiInfo = () => {
     const on = q('#eAI').checked, hasText = q('#eRaw').value.trim();
-    q('#eAIinfo').textContent = !on ? (s.stems ? '✓ Ya analizada (voz separada). Marca la casilla para volver a analizar.' : '')
+    const willSync = !on && s.analysis && (s.analysis.words || []).length && hasText && hasText !== (s.raw || '').trim() && !/\{time\s*:/i.test(hasText);
+    q('#eAIinfo').textContent = willSync ? '✓ Al guardar, esta letra se usará tal cual: se sincronizará con el análisis ya hecho y se le pondrán los acordes detectados (al instante, sin volver a analizar).'
+      : !on ? (s.stems ? '✓ Ya analizada (voz separada). Marca la casilla para volver a analizar.' : '')
       : (hasText ? 'Se usará esta letra tal cual: el análisis solo la sincroniza con el audio (y agrega acordes si no los tiene). '
                  : 'Sin letra: se transcribirá del audio. ') + 'Tarda unos minutos; puedes seguir usando la app.';
   };
@@ -3587,8 +3589,16 @@ function openEditor(song){
     if (trackChanged){ s.scrollStart = null; s.scrollEnd = null;
       if (s.stems){ for (const a of [s.stems.inst, s.stems.voc]){ DB.del('assets', a); decodedCache.delete(a); } s.stems = null; } }
     if (oldTrack && oldTrack.assetId && trackChanged && ![...S.songs.values()].some(x => x.id !== s.id && x.track && x.track.assetId === oldTrack.assetId)) { DB.del('assets', oldTrack.assetId); decodedCache.delete(oldTrack.assetId); }
+    let syncMsg = null;
+    if (!runAI && !trackChanged && s.analysis && (s.analysis.words || []).length && raw.trim() && song && song.raw !== raw && !/\{time\s*:/i.test(raw)){
+      const al = alignUserLyrics(s, s.analysis.words, {segments: s.analysis.chords || [], key: s.analysis.key});
+      if (al.ok){ s.rawBackup = song.raw; s.raw = al.raw; s.key = al.key || s.key;
+        syncMsg = al.approx ? 'Letra guardada con acordes aproximados (coincidió poco con el audio). Revísala en 🎸 Acordes.'
+          : `Letra guardada tal cual y sincronizada${al.addChords ? ', con los acordes detectados' : ''}.`; }
+    }
     await saveSong(s);
     m.close();
+    if (syncMsg) setTimeout(() => toast(syncMsg, 5000), 400);
     if (isNew){ S.setlist.push(s.id); saveSetlist(); }
     if (!S.curId) await setCurrent(s.id);
     else {
@@ -4020,10 +4030,15 @@ function alignUserLyrics(song, words, chords){
     if (b === 0){ if (wordSim(U[i-1].n, W[j-1].n) >= 0.65){ U[i-1].t = W[j-1].t0; matched++; } i--; j--; }
     else if (b === 1) i--; else j--;
   }
-  if (matched < Math.max(3, n * 0.15)) return {ok:false, matched, total:n};
+  let approx = false;
+  if (matched < Math.max(3, n * 0.15)){
+    // weak match: spread the official lyrics over the sung part so chords can still be placed (approximate)
+    approx = true; const a = W[0].t0, b = W[W.length - 1].t1 || W[W.length - 1].t0;
+    U.forEach((u, k) => u.t = a + (b - a) * k / Math.max(1, n - 1)); 
+  }
   // interpolate unmatched words between their matched neighbours
   const idx = U.map((u, k) => u.t != null ? k : -1).filter(k => k >= 0);
-  for (let k = 0; k < n; k++){
+  for (let k = 0; k < n && !approx; k++){
     if (U[k].t != null) continue;
     const a = idx.filter(q => q < k).pop(), b = idx.find(q => q > k);
     if (a == null) U[k].t = Math.max(0, U[b].t - (b - k) * 0.4);
@@ -4071,7 +4086,7 @@ function alignUserLyrics(song, words, chords){
     parsed.lines = out;
   }
   const keyOut = addChords ? (chords.key || song.key) : song.key;
-  return {ok:true, matched, total:n, addChords, key:keyOut,
+  return {ok:true, approx, matched, total:n, addChords, key:keyOut,
     raw: serializeChordPro(parsed, {title: song.title, artist: song.artist, key: keyOut})};
 }
 
@@ -4175,8 +4190,9 @@ const Analyzer = {
         const al = alignUserLyrics(fresh, words, chords);
         if (al.ok){
           fresh.rawBackup = fresh.raw; fresh.raw = al.raw; fresh.key = al.key || fresh.key;
-          doneMsg = `Listo. Usé tu letra tal cual: sincronicé cada línea con el audio${al.addChords ? ' y añadí los acordes detectados' : ' y conservé tus acordes'} (${Math.round(al.matched / al.total * 100)}% de palabras reconocidas).`;
-        } else notes.push('Tu letra no coincidió lo suficiente con lo que se escucha en el audio, así que la dejé sin sincronizar. ¿Es la misma versión de la canción?');
+          if (al.approx) notes.push(`Usé tu letra tal cual${al.addChords ? ' y le puse los acordes detectados' : ''}, pero coincidió poco con lo que se escucha (${Math.round(al.matched / al.total * 100)}%), así que los tiempos y acordes son aproximados. ¿Es la misma versión?`);
+          else doneMsg = `Listo. Usé tu letra tal cual: sincronicé cada línea con el audio${al.addChords ? ' y añadí los acordes detectados' : ' y conservé tus acordes'} (${Math.round(al.matched / al.total * 100)}% de palabras reconocidas).`;
+        } else notes.push('No pude sincronizar tu letra con el audio; la dejé tal cual.');
       } else notes.push('Se conservó tu letra; no se pudo transcribir el audio para sincronizarla.');
       fresh.stems = song.stems || fresh.stems;
       fresh.analysis = {date: new Date().toISOString(), chords: chords.segments, key: chords.key, words, model: S.settings.aiQuality, separated: !!parts};
@@ -4222,7 +4238,7 @@ function openSettings(){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz original (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px">Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v6</b> (21-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
