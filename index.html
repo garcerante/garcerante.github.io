@@ -3541,9 +3541,10 @@ function openEditor(song){
   const aiInfo = () => {
     const on = q('#eAI').checked, hasText = q('#eRaw').value.trim();
     q('#eAIinfo').textContent = !on ? (s.stems ? '✓ Ya analizada (voz separada). Marca la casilla para volver a analizar.' : '')
-      : (hasText ? 'Reemplazará el texto actual (quedará respaldado). ' : '') + 'Tarda unos minutos; puedes seguir usando la app.';
+      : (hasText ? 'Se usará esta letra tal cual: el análisis solo la sincroniza con el audio (y agrega acordes si no los tiene). '
+                 : 'Sin letra: se transcribirá del audio. ') + 'Tarda unos minutos; puedes seguir usando la app.';
   };
-  q('#eAI').onchange = aiInfo; aiInfo();
+  q('#eAI').onchange = aiInfo; aiInfo(); q('#eRaw').addEventListener('input', aiInfo);
   if (q('#eRestore')) q('#eRestore').onclick = () => { const cur = q('#eRaw').value; q('#eRaw').value = s.rawBackup; s.rawBackup = cur; refresh(); toast('Versión cambiada (guarda para conservarla).'); };
   q('#eCancel').onclick = m.close;
   q('#epPlay').onclick = () => P.toggle();
@@ -3982,6 +3983,98 @@ function jobPanel(title){
   return api;
 }
 
+/* ---- Use the user's lyrics as ground truth: align them to the transcription for timing ---- */
+const normWord = w => String(w || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9ñ]+/g, '');
+function wordSim(a, b){
+  if (!a || !b) return 0; if (a === b) return 1;
+  const n = a.length, m = b.length; if (Math.abs(n - m) > Math.max(n, m) * 0.6) return 0;
+  let prev = Array.from({length: m + 1}, (_, j) => j), cur = new Array(m + 1);
+  for (let i = 1; i <= n; i++){ cur[0] = i; for (let j = 1; j <= m; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1)); [prev, cur] = [cur, prev]; }
+  return 1 - prev[m] / Math.max(n, m);
+}
+function alignUserLyrics(song, words, chords){
+  const parsed = parseSong(song.raw);
+  const U = [];   // user tokens
+  let userChords = 0;
+  parsed.lines.forEach((l, li) => {
+    if (l.type !== 'lyric' && l.type !== 'mixed') return;
+    const m = ceModel(l); userChords += m.chords.filter(c => parseChord(String(c.chord).replace(/^[(\[]+|[)\]]+$/g, ''))).length;
+    const re = /\S+/g; let x;
+    while ((x = re.exec(m.text))){ const n = normWord(x[0]); if (n) U.push({li, off: x.index, n, t: null}); }
+  });
+  const W = words.map(w => ({n: normWord(w.text), t0: w.t0, t1: w.t1})).filter(w => w.n);
+  if (!U.length || !W.length) return {ok:false};
+  // Needleman–Wunsch: gaps are allowed on both sides (repeated choruses, misheard words)
+  const n = U.length, mm = W.length, GAP = 1, cost = new Float32Array((n + 1) * (mm + 1)), bt = new Uint8Array((n + 1) * (mm + 1));
+  const at = (i, j) => i * (mm + 1) + j;
+  for (let i = 1; i <= n; i++){ cost[at(i, 0)] = i * GAP; bt[at(i, 0)] = 1; }
+  for (let j = 1; j <= mm; j++){ cost[at(0, j)] = j * GAP * 0.6; bt[at(0, j)] = 2; }
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= mm; j++){
+    const sim = wordSim(U[i-1].n, W[j-1].n), d = cost[at(i-1, j-1)] + (sim >= 0.65 ? (1 - sim) * 0.5 : 1.6);
+    const up = cost[at(i-1, j)] + GAP, left = cost[at(i, j-1)] + GAP * 0.6;   // skipping transcribed words is cheaper (repeats)
+    if (d <= up && d <= left){ cost[at(i, j)] = d; bt[at(i, j)] = 0; } else if (up <= left){ cost[at(i, j)] = up; bt[at(i, j)] = 1; } else { cost[at(i, j)] = left; bt[at(i, j)] = 2; }
+  }
+  let i = n, j = mm, matched = 0;
+  while (i > 0 && j > 0){
+    const b = bt[at(i, j)];
+    if (b === 0){ if (wordSim(U[i-1].n, W[j-1].n) >= 0.65){ U[i-1].t = W[j-1].t0; matched++; } i--; j--; }
+    else if (b === 1) i--; else j--;
+  }
+  if (matched < Math.max(3, n * 0.15)) return {ok:false, matched, total:n};
+  // interpolate unmatched words between their matched neighbours
+  const idx = U.map((u, k) => u.t != null ? k : -1).filter(k => k >= 0);
+  for (let k = 0; k < n; k++){
+    if (U[k].t != null) continue;
+    const a = idx.filter(q => q < k).pop(), b = idx.find(q => q > k);
+    if (a == null) U[k].t = Math.max(0, U[b].t - (b - k) * 0.4);
+    else if (b == null) U[k].t = U[a].t + (k - a) * 0.4;
+    else U[k].t = U[a].t + (U[b].t - U[a].t) * (k - a) / (b - a);
+  }
+  // line times (monotonic)
+  const lineT = new Map(), lineEnd = new Map();
+  for (const u of U){ if (!lineT.has(u.li)) lineT.set(u.li, u.t); lineEnd.set(u.li, u.t + 0.4); }
+  let last = 0;
+  for (const [li, t] of [...lineT.entries()].sort((a, b) => a[0] - b[0])){ const tt = Math.max(last, t); parsed.lines[li].t = +tt.toFixed(2); last = tt; }
+  // chords: keep the user's; add detected ones only when the lyrics came without chords
+  const segs = (chords && chords.segments || []).filter(g => g.chord);
+  const addChords = userChords < 2 && segs.length > 0;
+  if (addChords){
+    const chordAt = t => { for (const g of segs) if (t >= g.t0 - 0.05 && t < g.t1) return g.chord; return null; };
+    let lastC = null;
+    const byLine = new Map(); for (const u of U){ if (!byLine.has(u.li)) byLine.set(u.li, []); byLine.get(u.li).push(u); }
+    const out = [];
+    const lis = [...byLine.keys()].sort((a, b) => a - b);
+    const firstT = lineT.get(lis[0]);
+    const intro = segs.filter(g => g.t1 > 0.3 && g.t0 < firstT - 0.3);
+    parsed.lines.forEach((l, li) => {
+      if (li === lis[0] && intro.length && firstT > 2){
+        out.push({type:'section', text:'Intro'}, {type:'chords', t: +Math.max(0, intro[0].t0).toFixed(2), parts: intro.slice(0, 8).map(g => ({chord:g.chord, isChord:true, text:' '}))}, {type:'blank'});
+        lastC = intro[intro.length - 1].chord;
+      }
+      const us = byLine.get(li);
+      if (us){
+        const m = ceModel(l);
+        for (const u of us){ const c = chordAt(u.t + 0.05); if (c && c !== lastC){ m.chords.push({off: u.off, chord: c}); lastC = c; } }
+        ceApply(l, m);
+        out.push(l);
+        // long instrumental gap before the next sung line → chord-only line
+        const k = lis.indexOf(li), nx = lis[k + 1];
+        if (nx != null){
+          const gapFrom = lineEnd.get(li), gapTo = lineT.get(nx);
+          if (gapTo - gapFrom > 6){
+            const run = segs.filter(g => g.t1 > gapFrom + 0.3 && g.t0 < gapTo - 0.3);
+            if (run.length >= 2){ out.push({type:'chords', t: +Math.max(gapFrom, run[0].t0).toFixed(2), parts: run.slice(0, 8).map(g => ({chord:g.chord, isChord:true, text:' '}))}); lastC = run[run.length - 1].chord; }
+          }
+        }
+      } else out.push(l);
+    });
+    parsed.lines = out;
+  }
+  const keyOut = addChords ? (chords.key || song.key) : song.key;
+  return {ok:true, matched, total:n, addChords, key:keyOut,
+    raw: serializeChordPro(parsed, {title: song.title, artist: song.artist, key: keyOut})};
+}
+
 const Analyzer = {
   queue: [], running: null,
   isBusy(id){ return this.running === id || this.queue.includes(id); },
@@ -4073,11 +4166,18 @@ const Analyzer = {
       const raw = AN_assemble({title: song.title, artist: song.artist, chords, words, duration: dur});
       const fresh = S.songs.get(id) || song;
       const hadText = !!(fresh.raw && fresh.raw.trim());
-      if (words.length || !hadText){
-        if (hadText) fresh.rawBackup = fresh.raw;
+      let doneMsg = 'Listo. Revisa la letra y los acordes en 🎸 Acordes o ✎ Editar; la detección automática no es perfecta.';
+      if (!hadText){
+        // no lyrics given → the transcription becomes the lyrics
         fresh.raw = raw; fresh.key = chords.key || fresh.key; fresh.notation = 'letter';
-      } else notes.push('Se conservó tu letra porque no se pudo transcribir; la versión detectada (solo acordes) quedó guardada para consultar.');
-      if (!words.length && hadText) fresh.rawBackup = raw;
+      } else if (words.length){
+        // the user's lyrics are the truth: only add line timing (and chords if they had none)
+        const al = alignUserLyrics(fresh, words, chords);
+        if (al.ok){
+          fresh.rawBackup = fresh.raw; fresh.raw = al.raw; fresh.key = al.key || fresh.key;
+          doneMsg = `Listo. Usé tu letra tal cual: sincronicé cada línea con el audio${al.addChords ? ' y añadí los acordes detectados' : ' y conservé tus acordes'} (${Math.round(al.matched / al.total * 100)}% de palabras reconocidas).`;
+        } else notes.push('Tu letra no coincidió lo suficiente con lo que se escucha en el audio, así que la dejé sin sincronizar. ¿Es la misma versión de la canción?');
+      } else notes.push('Se conservó tu letra; no se pudo transcribir el audio para sincronizarla.');
       fresh.stems = song.stems || fresh.stems;
       fresh.analysis = {date: new Date().toISOString(), chords: chords.segments, key: chords.key, words, model: S.settings.aiQuality, separated: !!parts};
       fresh.scrollStart = null; fresh.scrollEnd = null;
@@ -4085,7 +4185,7 @@ const Analyzer = {
       for (const d of DECKS) if (d.song && d.song.id === id){ if (!d.playing) await d.load(fresh); else { d.song = fresh; toast('La voz separada se activará cuando detengas la pista.'); } }
       renderLyricsIfCur(id); renderSetlist();
       J.mark('asm', 'done');
-      J.finish(notes.length ? notes.join(' ') + ' Revisa y corrige en ✎ Editar.' : 'Listo. Revisa la letra y los acordes en ✎ Editar; la detección automática no es perfecta.', !notes.length);
+      J.finish(notes.length ? notes.join(' ') + ' Revisa y corrige en ✎ Editar.' : doneMsg, !notes.length);
     } catch(e){
       if (e.message === '__cancel'){ J.finish('Análisis cancelado.', true); return; }
       console.error(e); J.finish('Error: ' + friendlyErr(e), false);
