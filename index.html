@@ -80,6 +80,7 @@ main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:colu
 .ln[data-t]{border-left:3px solid transparent;margin-left:-14px;padding-left:11px;border-radius:2px;transition:border-color .2s}
 .ln.now{border-left-color:var(--chord)}
 .editing #guide{display:none}
+.editing #lyrics{padding-left:58px}
 .editing #lyrics .ch[data-ci]{cursor:grab;border-radius:5px;transition:background .12s, box-shadow .12s}
 .editing #lyrics .ch[data-ci]:hover{background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent-soft)}
 .editing #lyrics .ch[data-ci].sel{background:var(--chord);color:var(--bg)}
@@ -98,6 +99,13 @@ main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:colu
 .chordpop .chips button:hover{background:var(--accent-soft);border-color:var(--chord)}
 .chordpop small{color:var(--muted)}
 .editbar{background:var(--accent-soft)}
+.editbar .group button{font-size:13px}
+.mono{font:12px ui-monospace,Menlo,monospace;color:var(--muted);min-width:76px;text-align:center}
+.lplay{position:absolute;left:-40px;top:50%;transform:translateY(-10%);font-size:11px;line-height:1;padding:5px 6px;border-radius:50%;opacity:0;transition:opacity .15s;color:var(--chord);border-color:var(--chord);background:var(--surface)}
+.editing #lyrics .ln[data-li]:hover .lplay,.editing #lyrics .ln.now .lplay{opacity:1}
+.eplayer{display:flex;align-items:center;gap:8px;padding:10px 18px;border-top:1px solid var(--border);background:var(--bg)}
+.eplayer .bar{height:8px;border-radius:4px;background:var(--surface2);cursor:pointer;position:relative;overflow:hidden;min-width:120px}
+.eplayer .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--accent);width:0}
 .editbar b{color:var(--accent)}
 .vox{display:flex;align-items:center;gap:6px;font-size:12px}
 .vox button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
@@ -268,6 +276,9 @@ footer.collapsed .fbody{display:none}
     <b>Editando acordes</b>
     <span class="muted">Clic en la letra para <b style="color:inherit">añadir</b> · clic en un acorde para <b style="color:inherit">cambiarlo o quitarlo</b> · arrástralo para <b style="color:inherit">moverlo</b></span>
     <span class="grow"></span>
+    <div class="group" title="Escucha la canción mientras corriges (Espacio = reproducir/pausa)">
+      <button id="ceBack" title="Retroceder 5 s">⏪ 5s</button><button id="cePlay" title="Reproducir / pausa (Espacio)">▶</button><button id="ceFwd" title="Adelantar 5 s">5s ⏩</button><span id="ceTime" class="mono">0:00 / 0:00</span>
+    </div>
     <button id="ceUndo" title="Deshacer (⌘Z)" disabled>↶ Deshacer</button>
     <button id="ceDone" class="primary">Listo</button>
   </div>
@@ -2848,6 +2859,7 @@ class Deck {
   }
   async play(){
     audio(); this.endedFired = false;
+    if (this.isCur){ S.userOffset = 0; S.lastManualAt = 0; S.nudge = 0; }
     if (this.kind === 'file'){ if (!this.buf) { toast('La pista aún se está preparando…'); return; } if (this.offset >= this.buf.duration - 0.1) this.offset = 0; this.startAt(this.offset); }
     else if (this.kind === 'yt'){ if (!this.yt || !this.yt.playVideo) { toast('YouTube aún no está listo'); return; } this.applyLevel(); this.yt.playVideo(); this.playing = true; }
     else { if (this.offset >= this.duration) this.offset = 0; this.clockStart = performance.now(); this.playing = true; }
@@ -2930,13 +2942,14 @@ function songHTML(song, o = {}){
   let h = '<div class="song">';
   parsed.lines.forEach((l, li) => {
     const tA = l.t != null ? ` data-t="${l.t}"` : '', liA = o.edit ? ` data-li="${li}"` : '';
+    const lp = o.edit && l.t != null ? `<button class="lplay" data-play="${l.t}" title="Escuchar desde esta línea">▶</button>` : '';
     if (l.type === 'blank') h += '<div class="ln blank"></div>';
     else if (l.type === 'section') h += `<div><div class="ln section">${esc(l.text)}</div></div>`;
     else if (l.type === 'tab') h += `<div class="ln tab">${esc(l.text)}</div>`;
     else if (l.type === 'lyric' && !o.edit) h += `<div class="ln lyric"${tA}>${esc(l.text)}</div>`;
-    else if (l.type === 'lyric') h += `<div class="ln mixed"${tA}${liA}><span class="seg" data-off="0"><span class="ch"></span><span class="tx">${esc(l.text)}</span></span>${add}</div>`;
+    else if (l.type === 'lyric') h += `<div class="ln mixed"${tA}${liA}>${lp}<span class="seg" data-off="0"><span class="ch"></span><span class="tx">${esc(l.text)}</span></span>${add}</div>`;
     else {
-      h += `<div class="ln ${l.type}"${tA}${liA}>`;
+      h += `<div class="ln ${l.type}"${tA}${liA}>${lp}`;
       let off = 0, ci = 0;
       for (const p of l.parts){
         const ch = p.chord != null ? chordHTML(p.chord, shift, opts, o.edit ? ci++ : null) : '<span class="ch"></span>';
@@ -3157,6 +3170,7 @@ $('#lyrics').addEventListener('pointermove', e => {
   }
   const ln = e.target.closest && e.target.closest('.ln[data-li]');
   if (CE.pop) return;   // keep the marker where the new chord will go
+  if (e.target.closest && e.target.closest('.lplay')){ ghost().style.display = 'none'; return; }
   if (!ln || (e.target.closest('.ch[data-ci]') && !(CE.drag && CE.drag.moving)) || e.target.closest('.addend')){ ghost().style.display = 'none'; return; }
   if (ln.classList.contains('chords')){ ghost().style.display = 'none'; return; }
   const c = ceCaret(e.clientX, e.clientY, ln);
@@ -3172,6 +3186,8 @@ $('#lyrics').addEventListener('pointerdown', e => {
 });
 $('#lyrics').addEventListener('pointerup', e => {
   if (!CE.on) return;
+  const lpb = e.target.closest('.lplay');
+  if (lpb){ const d = DECK_CUR(); cePopClose(); d.seek(Math.max(0, +lpb.dataset.play - 0.6)); if (!d.playing) d.play(); return; }
   if (CE.drag){
     const d = CE.drag; CE.drag = null; try { $('#lyrics').releasePointerCapture(e.pointerId); } catch(_){}
     if (d.g) d.g.remove(); d.el.style.opacity = '';
@@ -3192,6 +3208,9 @@ document.addEventListener('pointerdown', e => { if (CE.pop && !CE.pop.contains(e
 $('#btnChords').onclick = () => CE.on ? exitChordEdit() : enterChordEdit();
 $('#ceDone').onclick = exitChordEdit;
 $('#ceUndo').onclick = ceUndo;
+$('#cePlay').onclick = () => { const d = DECK_CUR(); if (d.song) d.toggle(); };
+$('#ceBack').onclick = () => { const d = DECK_CUR(); d.seek(Math.max(0, d.time - 5)); };
+$('#ceFwd').onclick = () => { const d = DECK_CUR(); d.seek(Math.min(d.duration || 1e9, d.time + 5)); };
 
 /* ================= Autoscroll loop ================= */
 function scrollTick(){
@@ -3200,7 +3219,10 @@ function scrollTick(){
   if (Math.abs(S.nudge) > 0.5){ const step = S.nudge * 0.18; S.nudge -= step; el.scrollTop += step; } else S.nudge = 0;
   if (song && d && d.song === song){
     // detect manual scroll since last frame
-    if (S.lastSet != null && Math.abs(el.scrollTop - S.lastSet) > 1.5){ S.userOffset += el.scrollTop - S.lastSet; S.lastManualAt = nowMs; }
+    if (S.lastSet != null && Math.abs(el.scrollTop - S.lastSet) > 1.5){
+      if (d.playing && S.scrollMode === 'auto' && !CE.on) S.userOffset += el.scrollTop - S.lastSet;   // paused: free reading, no offset
+      S.lastManualAt = nowMs;
+    }
     const tNow = d.time;
     if (S.timed && S.timed.length >= 2 && d.kind !== 'none'){
       // highlight the line being sung
@@ -3217,6 +3239,11 @@ function scrollTick(){
       S.userOffset = clamp(S.userOffset, -el.clientHeight * 0.3, el.clientHeight * 0.5);
       const want = target + S.userOffset;
       el.scrollTop += (want - el.scrollTop) * (1 - Math.exp(-dt * 8));
+    } else if (CE.on && d.playing && S.nowLine && !CE.pop && !CE.drag && nowMs - (S.lastManualAt || 0) > 2500){
+      // chord editor: follow the sung line only when it leaves the comfortable band
+      const r = S.nowLine, c = r.offsetTop + r.offsetHeight / 2 - el.scrollTop;
+      if (c < el.clientHeight * 0.12 || c > el.clientHeight * 0.7) S.ceFollow = true;
+      if (S.ceFollow){ const want = r.offsetTop + r.offsetHeight / 2 - el.clientHeight * 0.33; el.scrollTop += (want - el.scrollTop) * (1 - Math.exp(-dt * 6)); if (Math.abs(want - el.scrollTop) < 2) S.ceFollow = false; }
     } else if (S.scrollMode === 'auto' && d.playing){
       const dur = d.duration || songDuration(song);
       const start = song.scrollStart ?? 0, end = song.scrollEnd ?? dur;
@@ -3233,6 +3260,7 @@ function scrollTick(){
     if (d.kind === 'none' && d.playing && d.time >= d.duration){ d.pause(); d.offset = d.duration; d.onEnded(); }
   }
   for (const dk of DECKS) dk.tick();
+  if (CE.on && d){ $('#cePlay').textContent = d.playing ? '❚❚' : '▶'; $('#ceTime').textContent = fmtT(d.time) + ' / ' + fmtT(d.duration); }
   const info = $('#scrollInfo');
   if (song && d){
     const kindTxt = d.kind === 'file' ? 'sincronizado con la pista' : d.kind === 'yt' ? 'sincronizado con YouTube' : 'por tiempo';
@@ -3329,14 +3357,15 @@ $('#setlist').addEventListener('click', async e => {
 });
 
 function modal(html, {wide=true} = {}){
+  const api = {onClose:null};
   const ov = document.createElement('div'); ov.className = 'overlay';
   ov.innerHTML = `<div class="modal" style="${wide ? '' : 'width:min(560px,94vw)'}">${html}</div>`;
   document.body.appendChild(ov);
-  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
+  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); api.onClose && api.onClose(); };
   const onKey = e => { if (e.key === 'Escape'){ e.stopPropagation(); close(); } };
   document.addEventListener('keydown', onKey, true);
   ov.addEventListener('mousedown', e => { if (e.target === ov) close(); });
-  return {el: ov, close};
+  api.el = ov; api.close = close; return api;
 }
 function confirmBox(msg, ok='Sí', cancel='Cancelar'){
   return new Promise(res => {
@@ -3453,9 +3482,41 @@ function openEditor(song){
       </div>
       <div class="preview" id="ePrev"></div>
     </div>
+    <div class="eplayer" id="ePlayer">
+      <button id="epPlay" title="Reproducir / pausa (⌥ Espacio)">▶</button><button id="epBack" title="−5 s">⏪ 5s</button><button id="epFwd" title="+5 s">5s ⏩</button>
+      <div class="bar grow" id="epBar" title="Clic para saltar"><i></i></div><span class="mono" id="epTime">0:00 / 0:00</span>
+      <button id="epLine" title="Reproduce desde la línea donde está el cursor (canciones analizadas)">▶ Desde el cursor</button>
+      <span class="muted" style="font-size:12px">⌥ Espacio: reproducir/pausa</span>
+    </div>
     <div class="mfoot">${!isNew ? '<button id="eDel" style="margin-right:auto">Eliminar</button>' : ''}<button id="eCancel">Cancelar</button><button class="primary" id="eSave">${isNew ? 'Guardar y añadir al setlist' : 'Guardar'}</button></div>`);
   const q = x => $(x, m.el);
   let newAudio = null;
+  // ---- audio preview while editing
+  const P = { deck: DECKS.find(d => d.song && d.song.id === s.id) || null, au:null, url:null };
+  P.ensure = async () => {
+    if (P.deck || P.au) return true;
+    let blob = newAudio;
+    if (!blob && s.track && s.track.type === 'file'){ const a = await DB.get('assets', s.track.assetId); blob = a && a.blob; }
+    if (!blob){ toast(s.track && s.track.type === 'yt' ? 'Abre la canción en la pista para escuchar el video.' : 'Elige un archivo de audio para escucharlo aquí.'); return false; }
+    P.url = URL.createObjectURL(blob); P.au = new Audio(P.url); return true;
+  };
+  P.reset = () => { if (P.au){ P.au.pause(); URL.revokeObjectURL(P.url); } P.au = null; P.url = null; };
+  P.playing = () => P.deck ? P.deck.playing : !!(P.au && !P.au.paused);
+  P.time = () => P.deck ? P.deck.time : P.au ? P.au.currentTime : 0;
+  P.dur = () => P.deck ? P.deck.duration : P.au && isFinite(P.au.duration) ? P.au.duration : 0;
+  P.toggle = async () => { if (P.deck){ P.deck.toggle(); return; } if (!(await P.ensure())) return; P.au.paused ? P.au.play() : P.au.pause(); };
+  P.seek = async t => { t = Math.max(0, t); if (P.deck){ P.deck.seek(t); return; } if (!(await P.ensure())) return; P.au.currentTime = t; };
+  const pTimer = setInterval(() => {
+    const d = P.dur(), t = P.time(); q('#epPlay').textContent = P.playing() ? '❚❚' : '▶';
+    q('#epTime').textContent = fmtT(t) + ' / ' + fmtT(d); q('#epBar i').style.width = d ? clamp(t / d * 100, 0, 100) + '%' : '0';
+    // follow the playing line in the preview (songs with timing)
+    const tl = $$('.ln[data-t]', q('#ePrev')); let cur = null;
+    for (const l of tl) if (+l.dataset.t <= t + 0.15) cur = l;
+    tl.forEach(l => l.classList.toggle('now', l === cur));
+    if (cur && P.playing()){ const pv = q('#ePrev'), r = cur.getBoundingClientRect(), pr = pv.getBoundingClientRect();
+      if (r.top < pr.top + 20 || r.bottom > pr.bottom - 20) pv.scrollTop += r.top - pr.top - pv.clientHeight * 0.33; }
+  }, 200);
+  m.onClose = () => { clearInterval(pTimer); P.reset(); document.removeEventListener('keydown', onAltSpace, true); };
   const refresh = () => {
     const raw = q('#eRaw').value;
     const p = parseSong(raw);
@@ -3474,7 +3535,7 @@ function openEditor(song){
   q('#eFile').onclick = () => q('#eFileIn').click();
   q('#eFileIn').onchange = async e => { const f = e.target.files[0]; if (!f) return; q('#eRaw').value = await f.text(); if (!q('#eTitle').value) q('#eTitle').value = f.name.replace(/\.[^.]+$/,''); refresh(); };
   q('#eAudio').onclick = () => q('#eAudioIn').click();
-  q('#eAudioIn').onchange = e => { const f = e.target.files[0]; if (f){ newAudio = f; q('#eAudioName').textContent = f.name; q('#eAI').checked = true; aiInfo(); } };
+  q('#eAudioIn').onchange = e => { const f = e.target.files[0]; if (f){ newAudio = f; q('#eAudioName').textContent = f.name; q('#eAI').checked = true; aiInfo(); P.deck = null; P.reset(); } };
   q('#eLang').value = S.settings.aiLang;
   q('#eAI').checked = !!(s.track && s.track.type === 'file' && !s.stems && !(s.raw || '').trim());
   const aiInfo = () => {
@@ -3485,6 +3546,18 @@ function openEditor(song){
   q('#eAI').onchange = aiInfo; aiInfo();
   if (q('#eRestore')) q('#eRestore').onclick = () => { const cur = q('#eRaw').value; q('#eRaw').value = s.rawBackup; s.rawBackup = cur; refresh(); toast('Versión cambiada (guarda para conservarla).'); };
   q('#eCancel').onclick = m.close;
+  q('#epPlay').onclick = () => P.toggle();
+  q('#epBack').onclick = () => P.seek(P.time() - 5);
+  q('#epFwd').onclick = () => P.seek(P.time() + 5);
+  q('#epBar').onclick = async e => { if (!P.deck && !(await P.ensure())) return; await new Promise(r => setTimeout(r, 60)); const d = P.dur(); if (!d) return; const r = q('#epBar').getBoundingClientRect(); P.seek(clamp((e.clientX - r.left) / r.width, 0, 1) * d); };
+  q('#epLine').onclick = async () => {
+    const ta = q('#eRaw'), before = ta.value.slice(0, ta.selectionStart);
+    const ts = [...before.matchAll(/\{time\s*:\s*([\d.]+)\s*\}/gi)];
+    if (!ts.length){ toast('Esta letra no tiene marcas de tiempo (solo las canciones analizadas). Usa la barra o ±5 s.'); return; }
+    await P.seek(+ts[ts.length - 1][1] - 0.6); if (!P.playing()) P.toggle();
+  };
+  const onAltSpace = e => { if (e.altKey && e.code === 'Space'){ e.preventDefault(); e.stopPropagation(); P.toggle(); } };
+  document.addEventListener('keydown', onAltSpace, true);
   if (q('#eDel')) q('#eDel').onclick = async () => { if (await confirmBox(`¿Eliminar "${s.title}"?`, 'Eliminar')){ m.close(); await deleteSong(s.id); } };
   q('#eSave').onclick = async () => {
     const raw = q('#eRaw').value; const p = parseSong(raw);
@@ -4102,12 +4175,24 @@ $('#btnCollapse').onclick = () => { S.settings.footer = !S.settings.footer; appl
 function applyFooter(){ $('#footer').classList.toggle('collapsed', !S.settings.footer); $('#btnCollapse').textContent = S.settings.footer ? '▾ Ocultar' : '▴ Mostrar'; }
 $('#btnPadStop').onclick = () => { stopAllPads(); stopAllLoops(); };
 
+function isTyping(t){
+  if (!t || !t.closest) return false;
+  if (t.closest('textarea,[contenteditable]')) return true;
+  if (t.tagName === 'SELECT') return true;
+  return t.tagName === 'INPUT' && /^(text|url|number|search|email|password|)$/i.test(t.type || '');
+}
+// after using a dropdown/slider/checkbox, give the keyboard (and pedals) back to the app
+document.addEventListener('change', e => { if (e.target.matches && e.target.matches('select,input[type=range],input[type=checkbox],input[type=radio],input[type=color]') && !e.target.closest('.overlay,.pop')) e.target.blur(); });
+document.addEventListener('pointerup', e => { if (e.target.matches && e.target.matches('input[type=range],input[type=checkbox]') && !e.target.closest('.overlay,.pop')) setTimeout(() => e.target.blur(), 0); });
+// clicking the YouTube player moves keyboard focus into its iframe; take it back
+window.addEventListener('blur', () => setTimeout(() => { const a = document.activeElement; if (a && a.tagName === 'IFRAME'){ a.blur(); window.focus(); } }, 400));
 document.addEventListener('keydown', e => {
-  if (CE.on && !e.target.closest('input,textarea,select')){
+  if (CE.on && !isTyping(e.target) && !CE.pop){
     if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')){ e.preventDefault(); ceUndo(); return; }
     if (e.key === 'Escape'){ if (CE.pop) cePopClose(); else exitChordEdit(); return; }
   }
-  if (e.target.closest('input,textarea,select,[contenteditable]') || document.querySelector('.overlay') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (isTyping(e.target) || document.querySelector('.overlay') || CE.pop || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target !== document.body && e.target.blur) e.target.blur();   // sliders/checkboxes/buttons must not swallow stage shortcuts
   const k = e.key, el = $('#lyrics');
   if (k === ' '){ e.preventDefault(); const d = DECK_CUR(); if (d.song) d.toggle(); }
   else if (k === 't' || k === 'T' || k === 'ArrowRight'){ e.preventDefault(); transition(); }
