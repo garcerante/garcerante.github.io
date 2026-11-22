@@ -98,6 +98,14 @@ main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:colu
 .chordpop .chips button{font-weight:600;color:var(--chord);padding:4px 9px;border-radius:999px}
 .chordpop .chips button:hover{background:var(--accent-soft);border-color:var(--chord)}
 .chordpop small{color:var(--muted)}
+.wave{position:relative;height:160px;border:1px solid var(--border);border-radius:10px;background:var(--bg);cursor:crosshair;user-select:none;touch-action:none;overflow:hidden}
+.wave canvas{position:absolute;inset:0}
+.wave .ticks i{position:absolute;top:0;width:2px;height:14px;background:var(--chord);border-radius:1px;transform:translateX(-1px)}
+.wave .ticks i.lost{background:var(--rec)}
+.wave .cutz{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(135deg,rgba(220,38,38,.18) 0 6px,rgba(220,38,38,.06) 6px 12px);border-left:2px solid var(--rec);border-right:2px solid var(--rec);pointer-events:none}
+.wave .cutz span{position:absolute;bottom:4px;left:4px;font-size:11px;font-weight:700;color:var(--rec);white-space:nowrap}
+.wave .selz{position:absolute;top:0;bottom:0;background:rgba(37,99,235,.18);border-left:2px solid var(--info);border-right:2px solid var(--info);pointer-events:none}
+.wave .ph{position:absolute;top:0;bottom:0;width:2px;background:var(--text);pointer-events:none;transform:translateX(-1px)}
 .editbar{background:var(--accent-soft)}
 .editbar .group button{font-size:13px}
 .mono{font:12px ui-monospace,Menlo,monospace;color:var(--muted);min-width:76px;text-align:center}
@@ -230,7 +238,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v7 · 21-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v7</span></div>
+  <div class="brand" title="Escenario v8 · 22-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v8</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -269,6 +277,7 @@ footer.collapsed .fbody{display:none}
     <button id="markStart" title="Marca el momento en que empieza la letra (con la pista sonando)">Marcar inicio</button>
     <button id="markEnd" title="Marca el momento en que termina la letra">Marcar fin</button>
     <button id="markReset" class="ghost" title="Borrar marcas de sincronía">↺</button>
+    <button id="btnTrim" title="Quitar intros largas, diálogos o finales sin mover la letra ni los acordes">✂ Recortar</button>
     <button id="btnChords" title="Añadir, cambiar o mover acordes directamente sobre la letra">🎸 Acordes</button>
     <button id="btnEdit" title="Editar canción">✎ Editar</button>
   </div>
@@ -2806,11 +2815,23 @@ function ytId(url){
 }
 
 /* ================= Decks ================= */
+/* ---- Non-destructive cuts: times stay in the ORIGINAL audio timeline; playback skips the cut ranges ---- */
+function normCuts(cuts, dur){
+  const c = (cuts || []).map(([a, b]) => [clamp(Math.min(a, b), 0, dur || 1e9), clamp(Math.max(a, b), 0, dur || 1e9)]).filter(([a, b]) => b - a >= 0.05).sort((x, y) => x[0] - y[0]);
+  const out = []; for (const x of c){ const l = out[out.length - 1]; if (l && x[0] <= l[1] + 0.02) l[1] = Math.max(l[1], x[1]); else out.push([...x]); }
+  return out;
+}
+const cutLen = cuts => cuts.reduce((a, [x, y]) => a + (y - x), 0);
+function o2e(t, cuts){ let e = t; for (const [a, b] of cuts){ if (t >= b) e -= b - a; else if (t > a) e -= t - a; } return e; }
+function e2o(e, cuts){ let t = e; for (const [a, b] of cuts){ if (t >= a - 1e-6) t += b - a; else break; } return t; }
+function snapOut(t, cuts){ for (const [a, b] of cuts) if (t >= a - 1e-6 && t < b) return b; return t; }
+function keepSegs(cuts, dur){ const k = []; let p = 0; for (const [a, b] of cuts){ if (a > p) k.push([p, a]); p = Math.max(p, b); } if (dur > p) k.push([p, dur]); return k; }
+
 class Deck {
   constructor(i){
     this.i = i; this.el = $('#deck' + i); this.song = null; this.kind = 'none';
     this.level = 1; this.vol = 1; this.buf = null; this.bufs = []; this.srcs = []; this.out = null;
-    this.playing = false; this.offset = 0; this.startCtx = 0; this.clockStart = 0;
+    this.playing = false; this.offset = 0; this.eStart = 0; this.startCtx = 0; this.clockStart = 0;
     this.yt = null; this.ytReady = null; this.token = 0; this.status = ''; this.endedFired = false;
     this.build();
   }
@@ -2838,7 +2859,7 @@ class Deck {
     this.$.play.onclick = () => this.toggle();
     this.$.stop.onclick = () => { this.pause(); this.seek(0); };
     this.$.vol.oninput = () => { this.vol = +this.$.vol.value; this.applyLevel(); };
-    this.$.bar.onclick = e => { const r = this.$.bar.getBoundingClientRect(); const d = this.duration; if (d) this.seek(clamp((e.clientX - r.left)/r.width, 0, 1) * d); };
+    this.$.bar.onclick = e => { const r = this.$.bar.getBoundingClientRect(); const d = this.eDuration; if (d) this.seek(e2o(clamp((e.clientX - r.left)/r.width, 0, 1) * d, this.cuts)); };
     this.$.vbtn.onclick = () => this.toggleVoice();
     this.$.vvol.oninput = () => { if (!this.song) return; this.song.voiceVol = +this.$.vvol.value; this.song.voiceMuted = false; this.applyVoice(); };
     this.$.vvol.onchange = () => this.song && saveSong(this.song);
@@ -2854,8 +2875,15 @@ class Deck {
     if (this.song) return songDuration(this.song);
     return 0;
   }
+  get cuts(){ const d = this.duration; return this.song && this.song.cuts && this.song.cuts.length && this.kind !== 'none' && d ? normCuts(this.song.cuts, d) : []; }
+  get eDuration(){ return Math.max(0, this.duration - cutLen(this.cuts)); }   // length as heard (with cuts)
+  get eTime(){ return o2e(this.time, this.cuts); }                             // position as heard
   get time(){
-    if (this.kind === 'file') return this.playing ? Math.max(this.offset, this.offset + (ctx.currentTime - this.startCtx)) : this.offset;
+    if (this.kind === 'file'){
+      if (!this.playing) return this.offset;
+      const c = this.cuts, e = this.eStart + Math.max(0, ctx.currentTime - this.startCtx);
+      return Math.min(e2o(e, c), this.buf ? this.buf.duration : 1e9);
+    }
     if (this.kind === 'yt') { try { return this.yt && this.yt.getCurrentTime ? this.yt.getCurrentTime() || 0 : 0; } catch(e){ return 0; } }
     return this.playing ? this.offset + (performance.now() - this.clockStart)/1000 * S.speed : this.offset;
   }
@@ -2949,24 +2977,37 @@ class Deck {
   setLevel(x){ this.level = x; this.applyLevel(); }
   startAt(t, xfade){
     audio(); this.ensureOut();
-    const old = this.srcs, now = ctx.currentTime, when = now + 0.03;
-    const off = clamp(t, 0, Math.max(0, this.buf.duration - 0.05));
+    const old = this.srcs, now = ctx.currentTime, when = now + 0.03, dur = this.buf.duration, cuts = this.cuts;
+    const off = snapOut(clamp(t, 0, Math.max(0, dur - 0.05)), cuts), eStart = o2e(off, cuts);
+    // schedule every kept segment back to back (sample-accurate), with tiny fades at each join
+    const segs = keepSegs(cuts, dur).filter(([a, b]) => b > off + 0.01).map(([a, b]) => [Math.max(a, off), b]);
+    const F = 0.008;
     const news = this.bufs.map(({buf, role}) => {
-      const s = ctx.createBufferSource(); s.buffer = buf;
       const g = ctx.createGain(), v = this.roleGain(role), voc = role === 'voc';
       g.gain.setValueAtTime(xfade ? 0 : v, now);
       if (xfade) g.gain.linearRampToValueAtTime(v, when + 0.04);
-      s.connect(g).connect(this.out); s.start(when, off);
-      return {s, g, voc, role};
+      g.connect(this.out);
+      const ss = segs.map(([a, b], k) => {
+        const s = ctx.createBufferSource(); s.buffer = buf;
+        const sg = ctx.createGain(), at = when + (o2e(a, cuts) - eStart), len = b - a;
+        const joinIn = k > 0, joinOut = k < segs.length - 1;
+        sg.gain.setValueAtTime(joinIn ? 0 : 1, at); if (joinIn) sg.gain.linearRampToValueAtTime(1, at + F);
+        if (joinOut){ sg.gain.setValueAtTime(1, at + len - F); sg.gain.linearRampToValueAtTime(0, at + len); }
+        s.connect(sg).connect(g); s.start(at, a, joinOut ? len + F * 0.5 : undefined);
+        return s;
+      });
+      return {s: ss[0], ss, g, voc, role};
     });
-    news[0].s.onended = () => { if (this.srcs === news && this.playing && this.time >= this.buf.duration - 0.2) { this.playing = false; this.offset = this.buf.duration; this.onEnded(); this.render(); } };
-    this.srcs = news; this.offset = off; this.startCtx = when; this.playing = true;
-    for (const o of old){ try { o.g.gain.setTargetAtTime(0, when, 0.015); o.s.stop(when + 0.12); } catch(e){} }
+    const last = news[0] && news[0].ss[news[0].ss.length - 1];
+    if (last) last.onended = () => { if (this.srcs === news && this.playing && this.eTime >= this.eDuration - 0.25) { this.playing = false; this.offset = dur; this.onEnded(); this.render(); } };
+    this.srcs = news; this.offset = off; this.eStart = eStart; this.startCtx = when; this.playing = true;
+    for (const o of old){ try { o.g.gain.setTargetAtTime(0, when, 0.015); (o.ss || [o.s]).forEach(x => x.stop(when + 0.12)); } catch(e){} }
   }
+  applyCuts(){ if (this.kind === 'file' && this.playing && this.buf) this.startAt(this.time, true); else if (this.kind === 'file') this.offset = snapOut(this.offset, this.cuts); this.render(); renderMarks(this); }
   async play(){
     audio(); this.endedFired = false;
     if (this.isCur){ S.userOffset = 0; S.lastManualAt = 0; S.nudge = 0; }
-    if (this.kind === 'file'){ if (!this.buf) { toast('La pista aún se está preparando…'); return; } if (this.offset >= this.buf.duration - 0.1) this.offset = 0; this.startAt(this.offset); }
+    if (this.kind === 'file'){ if (!this.buf) { toast('La pista aún se está preparando…'); return; } if (o2e(this.offset, this.cuts) >= this.eDuration - 0.1) this.offset = 0; this.startAt(this.offset); }
     else if (this.kind === 'yt'){ if (!this.yt || !this.yt.playVideo) { toast('YouTube aún no está listo'); return; } this.applyLevel(); this.yt.playVideo(); this.playing = true; }
     else { if (this.offset >= this.duration) this.offset = 0; this.clockStart = performance.now(); this.playing = true; }
     this.render();
@@ -2978,7 +3019,7 @@ class Deck {
     else { this.offset = this.time; }
     this.playing = false; this.render();
   }
-  stopSrc(){ for (const o of this.srcs){ try { o.g.gain.setTargetAtTime(0, ctx.currentTime, 0.01); o.s.stop(ctx.currentTime + 0.08); } catch(e){} } this.srcs = []; }
+  stopSrc(){ for (const o of this.srcs){ try { o.g.gain.setTargetAtTime(0, ctx.currentTime, 0.01); (o.ss || [o.s]).forEach(x => x.stop(ctx.currentTime + 0.08)); } catch(e){} } this.srcs = []; }
   stop(silent){
     if (this.kind === 'file') this.stopSrc();
     if (this.kind === 'yt' && this.yt && this.yt.stopVideo) { try { this.yt.stopVideo(); } catch(e){} }
@@ -2986,6 +3027,7 @@ class Deck {
   }
   toggle(){ this.playing ? this.pause() : this.play(); }
   seek(t){
+    t = snapOut(Math.max(0, t), this.cuts);
     if (this.kind === 'file'){ if (this.playing) this.startAt(t, true); else this.offset = t; }
     else if (this.kind === 'yt'){ try { this.yt.seekTo(t, true); } catch(e){} }
     else { this.offset = t; this.clockStart = performance.now(); }
@@ -3002,9 +3044,12 @@ class Deck {
     this.tick();
   }
   tick(){
-    const d = this.duration, t = this.time;
+    // YouTube can't be scheduled: jump over cut ranges as soon as playback enters one
+    if (this.kind === 'yt' && this.playing && this.yt && this.yt.seekTo){ const c = this.cuts, t = this.time; for (const [a, b] of c) if (t >= a && t < b - 0.3){ try { this.yt.seekTo(b, true); } catch(e){} break; } }
+    const d = this.eDuration, t = this.eTime;
     this.$.prog.style.width = d ? clamp(t/d*100, 0, 100) + '%' : '0';
-    this.$.time.textContent = fmtT(t) + ' / ' + fmtT(d);
+    this.$.time.textContent = fmtT(t) + ' / ' + fmtT(d) + (this.cuts.length ? ' ✂' : '');
+    this.$.time.title = this.cuts.length ? 'Duración con recortes (original ' + fmtT(this.duration) + ')' : '';
   }
 }
 let DECKS = [];
@@ -3018,9 +3063,9 @@ function songDuration(song){
   return Math.max(60, n * 3.2);
 }
 function renderMarks(deck){
-  const d = deck.duration, s = deck.song;
+  const d = deck.eDuration, s = deck.song, c = deck.cuts;
   for (const [el, v] of [[deck.$.m1, s && s.scrollStart], [deck.$.m2, s && s.scrollEnd]]){
-    if (d && v != null){ el.style.left = clamp(v/d*100,0,100) + '%'; el.classList.remove('hidden'); } else el.classList.add('hidden');
+    if (d && v != null){ el.style.left = clamp(o2e(v, c)/d*100,0,100) + '%'; el.classList.remove('hidden'); } else el.classList.add('hidden');
   }
 }
 
@@ -3115,6 +3160,115 @@ function applyTheme(){
   const t = S.settings.theme === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : S.settings.theme;
   document.documentElement.dataset.theme = t;
   const bt = document.getElementById('btnTheme'); if (bt) bt.textContent = t === 'dark' ? '☀︎' : '☾';
+}
+
+/* ================= Trim editor (non-destructive cuts) ================= */
+const fmtTd = t => { t = Math.max(0, t || 0); const m = Math.floor(t / 60), s = t - m * 60; return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1); };
+const parseTd = v => { v = String(v).trim().replace(',', '.'); const m = v.match(/^(\d+):(\d{1,2}(?:\.\d+)?)$/); if (m) return +m[1] * 60 + +m[2]; return /^\d+(\.\d+)?$/.test(v) ? +v : NaN; };
+async function openTrimmer(){
+  const s = curSong(), d = DECK_CUR();
+  if (!s || !s.track){ toast('Esta canción no tiene pista de audio para recortar.'); return; }
+  if (!d.song || d.song.id !== s.id){ toast('Abre la canción en la pista "Ahora" para recortarla.'); return; }
+  if (d.kind === 'file' && !d.buf){ toast('La pista aún se está preparando…'); return; }
+  const dur = d.duration; if (!dur){ toast('La pista aún no está lista.'); return; }
+  let sel = null;
+  const m = modal(`<div class="mhead"><h2>✂ Recortar audio — ${esc(s.title)}</h2><span class="muted" id="tDur"></span></div>
+    <div class="mbody" style="flex-direction:column;gap:12px">
+      <div class="muted" style="font-size:13px">Lo recortado <b>no se borra</b>: al reproducir, la canción lo salta. La letra, los acordes y el scroll no cambian. Arrastra sobre la onda para seleccionar; clic para mover el cursor. Las marcas de arriba son las líneas de la letra.</div>
+      <div class="wave" id="tWave"><canvas></canvas><div class="ticks"></div><div class="zones"></div><div class="selz hidden"></div><div class="ph"></div></div>
+      <div class="row" style="flex-wrap:wrap">
+        <div class="group"><button id="tBack" title="−5 s">⏪ 5s</button><button id="tPlay" title="Reproducir / pausa (Espacio)">▶</button><button id="tFwd" title="+5 s">5s ⏩</button></div>
+        <span class="mono" id="tPos" style="min-width:150px"></span>
+        <span class="grow"></span>
+        <button id="tHead" title="Quita todo lo que está antes del cursor (intro, diálogos…)">⇤ Quitar todo antes del cursor</button>
+        <button id="tTail" title="Quita todo lo que está después del cursor">Quitar todo después del cursor ⇥</button>
+      </div>
+      <div class="row" style="flex-wrap:wrap">
+        <span class="muted">Selección</span><input type="text" id="tA" style="width:90px" placeholder="0:00.0"><span class="muted">→</span><input type="text" id="tB" style="width:90px" placeholder="0:00.0">
+        <button id="tListen" title="Escuchar la selección">▶ Escuchar selección</button>
+        <button id="tCut" class="primary">✂ Quitar selección</button>
+      </div>
+      <div id="tList" class="liblist"></div>
+    </div>
+    <div class="mfoot"><button id="tReset" style="margin-right:auto">Restaurar todo</button><button id="tDone" class="primary">Listo</button></div>`);
+  const q = x => $(x, m.el), wave = q('#tWave'), cv = $('canvas', wave);
+  const lines = parseSong(s.raw || '').lines.filter(l => l.t != null && (l.type === 'mixed' || l.type === 'lyric'))
+    .map(l => ({t: l.t, text: (l.text || (l.parts || []).map(p => p.text).join('')).trim()}));
+  const X = t => clamp(t / dur, 0, 1) * 100 + '%';
+  const tAt = ev => { const r = wave.getBoundingClientRect(); return clamp((ev.clientX - r.left) / r.width, 0, 1) * dur; };
+  // waveform
+  let peaks = null;
+  const draw = () => {
+    const w = wave.clientWidth, h = wave.clientHeight, dpr = devicePixelRatio || 1;
+    cv.width = w * dpr; cv.height = h * dpr; cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    const g = cv.getContext('2d'); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+    const col = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#888';
+    g.fillStyle = col; g.globalAlpha = 0.75;
+    if (!peaks){ g.fillRect(0, h / 2 - 1, w, 2); return; }
+    const n = peaks.length;
+    for (let x = 0; x < w; x++){ const p = peaks[Math.floor(x / w * n)] || 0, hh = Math.max(1, p * (h - 24) * 0.95); g.fillRect(x, (h + 18) / 2 - hh / 2, 1, hh); }
+  };
+  if (d.kind === 'file'){
+    decodeAsset(s.track.assetId).then(b => {
+      const n = 2000, a0 = b.getChannelData(0), a1 = b.numberOfChannels > 1 ? b.getChannelData(1) : a0, step = Math.floor(b.length / n);
+      peaks = new Float32Array(n); let mx = 1e-6;
+      for (let i = 0; i < n; i++){ let p = 0; for (let j = i * step, e = j + step; j < e; j += 4){ const v = Math.max(Math.abs(a0[j]), Math.abs(a1[j])); if (v > p) p = v; } peaks[i] = p; if (p > mx) mx = p; }
+      for (let i = 0; i < n; i++) peaks[i] /= mx;
+      draw();
+    }).catch(() => draw());
+  }
+  draw();
+  const linesIn = ([a, b]) => lines.filter(l => l.t >= a && l.t < b);
+  const render = () => {
+    const cuts = normCuts(s.cuts || [], dur);
+    $('.zones', wave).innerHTML = cuts.map(([a, b]) => `<div class="cutz" style="left:${X(a)};width:calc(${X(b)} - ${X(a)})"><span>✂ ${fmtT(b - a)}</span></div>`).join('');
+    $('.ticks', wave).innerHTML = lines.map(l => `<i style="left:${X(l.t)}" class="${cuts.some(([a, b]) => l.t >= a && l.t < b) ? 'lost' : ''}" title="${fmtTd(l.t)} · ${esc(l.text.slice(0, 50))}"></i>`).join('');
+    const sz = $('.selz', wave);
+    if (sel){ sz.classList.remove('hidden'); sz.style.left = X(Math.min(...sel)); sz.style.width = `calc(${X(Math.max(...sel))} - ${X(Math.min(...sel))})`; }
+    else sz.classList.add('hidden');
+    q('#tA').value = sel ? fmtTd(Math.min(...sel)) : ''; q('#tB').value = sel ? fmtTd(Math.max(...sel)) : '';
+    q('#tCut').disabled = !sel; q('#tListen').disabled = !sel;
+    q('#tDur').textContent = 'Duración ' + fmtT(dur) + (cuts.length ? ' → ' + fmtT(dur - cutLen(cuts)) + ' con recortes' : '');
+    q('#tList').innerHTML = cuts.length ? cuts.map(([a, b], i) => { const lost = linesIn([a, b]).length;
+      return `<div class="libitem"><div class="t"><b>Recorte ${i + 1}: ${fmtTd(a)} → ${fmtTd(b)} <span class="muted" style="font-weight:400">(${fmtT(b - a)})</span></b>
+        ${lost ? `<span style="color:var(--rec);font-size:12px">⚠ Quita ${lost} línea${lost > 1 ? 's' : ''} de la letra</span>` : '<span class="muted" style="font-size:12px">No toca la letra</span>'}</div>
+        <button data-listen="${i}">▶ Escuchar la unión</button><button data-undo="${i}">✕ Restaurar</button></div>`; }).join('')
+      : '<p class="muted" style="margin:0">Todavía no hay recortes.</p>';
+  };
+  const setCuts = cuts => { s.cuts = normCuts(cuts, dur).map(([x, y]) => [+x.toFixed(2), +y.toFixed(2)]); saveSong(s); for (const dk of DECKS) if (dk.song && dk.song.id === s.id){ dk.song = s; dk.applyCuts(); } render(); };
+  const addCut = (a, b) => { if (!(b - a >= 0.1)){ toast('La selección es muy corta.'); return; }
+    if (b - a >= dur - cutLen(normCuts(s.cuts || [], dur)) - 1){ toast('No se puede quitar toda la canción.'); return; }
+    setCuts([...(s.cuts || []), [a, b]]); sel = null; render(); };
+  // pointer: drag = select, click = move cursor
+  let down = null;
+  wave.addEventListener('pointerdown', e => { down = {t: tAt(e), x: e.clientX}; wave.setPointerCapture(e.pointerId); });
+  wave.addEventListener('pointermove', e => { if (!down) return; if (Math.abs(e.clientX - down.x) > 4){ sel = [down.t, tAt(e)]; render(); } });
+  wave.addEventListener('pointerup', e => { if (!down) return; const moved = Math.abs(e.clientX - down.x) > 4; const t = tAt(e); down = null;
+    if (!moved){ sel = null; d.seek(t); render(); } else { sel = [Math.min(sel[0], sel[1]), Math.max(sel[0], sel[1])]; render(); } });
+  const readSel = () => { const a = parseTd(q('#tA').value), b = parseTd(q('#tB').value); if (isFinite(a) && isFinite(b)){ sel = [clamp(Math.min(a, b), 0, dur), clamp(Math.max(a, b), 0, dur)]; render(); } };
+  q('#tA').onchange = readSel; q('#tB').onchange = readSel;
+  q('#tCut').onclick = () => sel && addCut(sel[0], sel[1]);
+  q('#tListen').onclick = () => { if (!sel) return; const was = s.cuts; d.seek(sel[0]); if (!d.playing) d.play(); };
+  q('#tHead').onclick = () => { const t = d.time; if (t < 0.2){ toast('Mueve el cursor a donde debe empezar la canción (clic en la onda).'); return; } addCut(0, t); d.seek(0); };
+  q('#tTail').onclick = () => { const t = d.time; if (t > dur - 0.2){ toast('Mueve el cursor a donde debe terminar la canción.'); return; } addCut(t, dur); };
+  q('#tList').onclick = e => { const l = e.target.dataset.listen, u = e.target.dataset.undo, cuts = normCuts(s.cuts || [], dur);
+    if (l != null){ d.seek(Math.max(0, cuts[+l][0] - 3)); if (!d.playing) d.play(); }
+    if (u != null){ cuts.splice(+u, 1); setCuts(cuts); } };
+  q('#tReset').onclick = () => { setCuts([]); toast('Se restauró el audio completo.'); };
+  q('#tDone').onclick = m.close;
+  q('#tPlay').onclick = () => d.toggle();
+  q('#tBack').onclick = () => d.seek(Math.max(0, e2o(Math.max(0, d.eTime - 5), d.cuts)));
+  q('#tFwd').onclick = () => d.seek(e2o(Math.min(d.eDuration, d.eTime + 5), d.cuts));
+  const onKey = e => { if (e.code === 'Space' && !isTyping(e.target)){ e.preventDefault(); e.stopPropagation(); d.toggle(); } };
+  document.addEventListener('keydown', onKey, true);
+  const onResize = () => draw(); addEventListener('resize', onResize);
+  let raf = 0;
+  const loop = () => { if (!document.body.contains(m.el)) return;
+    $('.ph', wave).style.left = X(d.time); q('#tPlay').textContent = d.playing ? '❚❚' : '▶';
+    q('#tPos').textContent = 'Cursor ' + fmtTd(d.time) + (d.cuts.length ? ' · se oye en ' + fmtT(d.eTime) : '');
+    raf = requestAnimationFrame(loop); };
+  m.onClose = () => { document.removeEventListener('keydown', onKey, true); removeEventListener('resize', onResize); cancelAnimationFrame(raf); };
+  render(); loop();
 }
 
 /* ================= Visual chord editor ================= */
@@ -3312,6 +3466,7 @@ $('#lyrics').addEventListener('pointerup', e => {
 });
 document.addEventListener('pointerdown', e => { if (CE.pop && !CE.pop.contains(e.target)){ cePopClose(); CE.justClosed = !!e.target.closest('#lyrics'); } }, true);
 $('#btnChords').onclick = () => CE.on ? exitChordEdit() : enterChordEdit();
+$('#btnTrim').onclick = () => { if (CE.on) exitChordEdit(); openTrimmer(); };
 $('#ceDone').onclick = exitChordEdit;
 $('#ceUndo').onclick = ceUndo;
 $('#cePlay').onclick = () => { const d = DECK_CUR(); if (d.song) d.toggle(); };
@@ -3361,7 +3516,7 @@ function scrollTick(){
     S.lastSet = el.scrollTop;
     // auto transition
     if (S.settings.autoFade && d.playing && !S.fading && DECK_NEXT().song && d.duration > 0 && d.kind !== 'none'){
-      if (d.duration - d.time <= S.settings.fadeSec + 0.2) transition();
+      if (d.eDuration - d.eTime <= S.settings.fadeSec + 0.2) transition();
     }
     if (d.kind === 'none' && d.playing && d.time >= d.duration){ d.pause(); d.offset = d.duration; d.onEnded(); }
   }
@@ -4407,7 +4562,7 @@ function openSettings(){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v7</b> (21-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v8</b> (22-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
