@@ -238,7 +238,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v8 · 22-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v8</span></div>
+  <div class="brand" title="Escenario v10 · 22-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v10</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -2207,13 +2207,18 @@ function transposeToken(tok, shift, opts){
 
 const SECTION_WORDS = /^(intro|introducci[oó]n|verso|verse|estrofa|pre-?coro|pre-?chorus|coro|chorus|estribillo|puente|bridge|solo|interludio|interlude|instrumental|final|outro|ending|fin|tag|refr[aá]n|riff|parte|part|hook|vamp|break)\b/i;
 
+const SECTION_ONLY = new RegExp('^' + SECTION_WORDS.source.slice(1).replace(/\\b$/, '') + '(\\s*(\\d+|[ivx]+))?(\\s*\\(?x\\d+\\)?)?$', 'i');
 function detectSection(line){
   const t = line.trim();
   let m = t.match(/^\[([^\]]+)\]$/);
   if (m && !isChordToken(m[1])) return m[1];
   m = t.match(/^\{(?:c|comment|ci|comment_italic|cb|comment_box)\s*:\s*(.*)\}$/i);
   if (m) return m[1];
-  if (SECTION_WORDS.test(t) && t.length < 40 && (/:$/.test(t) || t.split(/\s+/).length <= 4) && !isChordLine(t)) return t.replace(/:$/,'');
+  if (t.length >= 40 || !SECTION_WORDS.test(t) || isChordLine(t)) return null;
+  // only real headings: "Coro:", "Coro", "Coro 2", "Intro x2", "PUENTE" — never a lyric such as "Solo tú" or "Final feliz"
+  if (/:$/.test(t)) return t.replace(/:$/, '');
+  if (SECTION_ONLY.test(t)) return t;
+  if (t === t.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(t) && t.split(/\s+/).length <= 3) return t;
   return null;
 }
 
@@ -3473,6 +3478,20 @@ $('#cePlay').onclick = () => { const d = DECK_CUR(); if (d.song) d.toggle(); };
 $('#ceBack').onclick = () => { const d = DECK_CUR(); d.seek(Math.max(0, d.time - 5)); };
 $('#ceFwd').onclick = () => { const d = DECK_CUR(); d.seek(Math.min(d.duration || 1e9, d.time + 5)); };
 
+/* Teleprompter target: the sung line sits on the reading band; shortly before the next line starts,
+   the text glides smoothly to it (never earlier, so it doesn't run ahead of the singer). */
+function teleTarget(T, tNow, el){
+  const ctr = e => e.offsetTop + e.offsetHeight / 2, ARR = 0.15;
+  let i = 0; while (i + 1 < T.length && T[i+1].t <= tNow + ARR) i++;
+  let y = ctr(T[i].el);
+  const nx = T[i+1];
+  if (nx && T[i].t <= tNow + ARR){
+    const gap = nx.t - T[i].t, glide = Math.min(1.2, Math.max(0.25, gap * 0.4));
+    const p = clamp((tNow + ARR - (nx.t - glide)) / glide, 0, 1), ease = p * p * (3 - 2 * p);
+    y += (ctr(nx.el) - y) * ease;
+  }
+  return y - el.clientHeight * 0.33;
+}
 /* ================= Autoscroll loop ================= */
 function scrollTick(){
   const el = $('#lyrics'), d = DECK_CUR(), song = curSong();
@@ -3491,21 +3510,17 @@ function scrollTick(){
       const nl = idx >= 0 ? S.timed[idx].el : null;
       if (nl !== S.nowLine){ S.nowLine && S.nowLine.classList.remove('now'); nl && nl.classList.add('now'); S.nowLine = nl; }
     }
-    if (S.scrollMode === 'auto' && d.playing && S.timed && S.timed.length >= 2 && d.kind !== 'none'){
-      // teleprompter: the line being sung stays on the reading band; move to the next one just before it starts
-      const T = S.timed, LEAD = 0.35;
-      let i = 0; while (i + 1 < T.length && T[i+1].t <= tNow + LEAD) i++;
-      const e = T[i].el, target = e.offsetTop + e.offsetHeight / 2 - el.clientHeight * 0.33;
-      if (nowMs - (S.lastManualAt || 0) > 3500) S.userOffset *= Math.pow(0.08, dt);   // drift back so the sung line never leaves the screen
-      S.userOffset = clamp(S.userOffset, -el.clientHeight * 0.3, el.clientHeight * 0.5);
-      const want = target + S.userOffset;
-      el.scrollTop += (want - el.scrollTop) * (1 - Math.exp(-dt * 8));
-    } else if (CE.on && d.playing && S.nowLine && !CE.pop && !CE.drag && nowMs - (S.lastManualAt || 0) > 2500){
-      // chord editor: follow the sung line only when it leaves the comfortable band
-      const r = S.nowLine, c = r.offsetTop + r.offsetHeight / 2 - el.scrollTop;
-      if (c < el.clientHeight * 0.12 || c > el.clientHeight * 0.7) S.ceFollow = true;
-      if (S.ceFollow){ const want = r.offsetTop + r.offsetHeight / 2 - el.clientHeight * 0.33; el.scrollTop += (want - el.scrollTop) * (1 - Math.exp(-dt * 6)); if (Math.abs(want - el.scrollTop) < 2) S.ceFollow = false; }
-    } else if (S.scrollMode === 'auto' && d.playing){
+    const tele = S.timed && S.timed.length >= 2 && d.kind !== 'none';
+    // in the chord editor the lyrics also follow the song, but hold still while you work (popover, drag, or you scrolled)
+    const ceHold = CE.on && (CE.pop || CE.drag || nowMs - (S.lastManualAt || 0) < 4000);
+    if (d.playing && tele && ((S.scrollMode === 'auto' && !CE.on) || (CE.on && !ceHold))){
+      if (!CE.on){
+        if (nowMs - (S.lastManualAt || 0) > 3500) S.userOffset *= Math.pow(0.08, dt);   // drift back so the sung line never leaves the screen
+        S.userOffset = clamp(S.userOffset, -el.clientHeight * 0.3, el.clientHeight * 0.5);
+      } else S.userOffset = 0;
+      const want = teleTarget(S.timed, tNow, el) + S.userOffset;
+      el.scrollTop += (want - el.scrollTop) * (1 - Math.exp(-dt * 10));
+    } else if (S.scrollMode === 'auto' && d.playing && !CE.on){
       const dur = d.duration || songDuration(song);
       const start = song.scrollStart ?? 0, end = song.scrollEnd ?? dur;
       const p = clamp((d.time - start) / Math.max(1, end - start), 0, 1);
@@ -3736,6 +3751,7 @@ function openEditor(song){
               <select id="eLang" style="font-size:12px;padding:3px"><option value="spanish">Español</option><option value="english">Inglés</option><option value="portuguese">Portugués</option><option value="auto">Automático</option></select>
               <span id="eAIinfo"></span></div>
             ${s.stems && !s.stems.back ? '<div class="row"><button id="eBack" style="font-size:12px">👥 Separar coros de la voz principal (sin repetir el análisis, ~1 min)</button></div>' : ''}
+            ${s.analysis && (s.analysis.words || []).length ? '<div class="row"><button id="eResync" style="font-size:12px" title="Rehace los tiempos de cada línea usando el análisis guardado. No cambia tu texto ni tus acordes.">⟳ Volver a sincronizar la letra con el audio</button></div>' : ''}
             ${s.rawBackup ? '<div class="row"><button id="eRestore" class="ghost" style="font-size:12px">↶ Recuperar la otra versión del texto (antes/después del análisis)</button></div>' : ''}
           </div>
         </div>
@@ -3810,6 +3826,13 @@ function openEditor(song){
   };
   q('#eAI').onchange = aiInfo; aiInfo(); q('#eRaw').addEventListener('input', aiInfo);
   if (q('#eBack')) q('#eBack').onclick = () => { Analyzer.enqueue(s.id, 'bv'); q('#eBack').disabled = true; q('#eBack').textContent = '👥 Separando coros… (sigue el progreso arriba)'; };
+  if (q('#eResync')) q('#eResync').onclick = () => {
+    const text = q('#eRaw').value.replace(/^\s*\{time\s*:[^}]*\}\s*$\n?/gim, '');
+    const al = alignUserLyrics({...s, raw: text, title: q('#eTitle').value || s.title, artist: q('#eArtist').value || s.artist}, s.analysis.words, {segments: s.analysis.chords || [], key: s.analysis.key});
+    if (!al.ok){ toast('No pude sincronizar esta letra con el audio.'); return; }
+    q('#eRaw').value = al.raw; refresh(); aiInfo();
+    toast(al.approx ? 'Tiempos aproximados (la letra coincidió poco con el audio). Revisa y pulsa Guardar.' : `Letra re-sincronizada (${Math.round(al.matched / al.total * 100)}% de palabras reconocidas). Pulsa Guardar para conservarla.`, 5000);
+  };
   if (q('#eRestore')) q('#eRestore').onclick = () => { const cur = q('#eRaw').value; q('#eRaw').value = s.rawBackup; s.rawBackup = cur; refresh(); toast('Versión cambiada (guarda para conservarla).'); };
   q('#eCancel').onclick = m.close;
   q('#epPlay').onclick = () => P.toggle();
@@ -4279,7 +4302,32 @@ function wordSim(a, b){
   for (let i = 1; i <= n; i++){ cur[0] = i; for (let j = 1; j <= m; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1)); [prev, cur] = [cur, prev]; }
   return 1 - prev[m] / Math.max(n, m);
 }
+/* Whisper sometimes stamps a word far from where it was sung. Words must be in time order, so keep the longest
+   time-ordered run (LIS) as reliable anchors and re-time the outliers by interpolating between their neighbours. */
+function fixWordTimes(words){
+  const n = words.length; if (n < 3) return words.slice();
+  const tails = [], prev = new Int32Array(n).fill(-1);
+  for (let i = 0; i < n; i++){
+    const v = words[i].t0; let lo = 0, hi = tails.length;
+    while (lo < hi){ const m = (lo + hi) >> 1; if (words[tails[m]].t0 <= v) lo = m + 1; else hi = m; }
+    if (lo > 0) prev[i] = tails[lo - 1]; tails[lo] = i;
+  }
+  const keep = new Uint8Array(n); for (let k = tails[tails.length - 1]; k >= 0; k = prev[k]) keep[k] = 1;
+  const out = words.map(w => ({...w}));
+  const kIdx = []; for (let i = 0; i < n; i++) if (keep[i]) kIdx.push(i);
+  for (let i = 0; i < n; i++){
+    if (keep[i]) continue;
+    const a = kIdx.filter(q => q < i).pop(), b = kIdx.find(q => q > i);
+    const ta = a != null ? out[a].t1 ?? out[a].t0 : (b != null ? out[b].t0 - (b - i) * 0.35 : 0);
+    const tb = b != null ? out[b].t0 : ta + (i - a) * 0.35;
+    const lo = a != null ? a : i - 1, span = (b != null ? b : i + 1) - lo;
+    const t = ta + (tb - ta) * (i - lo) / span;
+    out[i].t0 = +Math.max(0, t).toFixed(2); out[i].t1 = +Math.max(0, t + 0.3).toFixed(2); out[i].fixed = true;
+  }
+  return out;
+}
 function alignUserLyrics(song, words, chords){
+  words = fixWordTimes(words);
   const parsed = parseSong(song.raw);
   const U = [];   // user tokens
   let userChords = 0;
@@ -4485,7 +4533,8 @@ const Analyzer = {
             const ws = out.chunks.filter(c => c.text && !HALLU.test(c.text.trim()));
             if (HALLU.test((out.text||'').trim()) && ws.length < 3) continue;
             for (const c of ws){ const a = c.timestamp && c.timestamp[0] != null ? c.timestamp[0] : 0, b = c.timestamp && c.timestamp[1] != null ? c.timestamp[1] : a + 0.3;
-              words.push({text:c.text, ph:i, t0: +(ph.t0 + a).toFixed(2), t1: +(ph.t0 + b).toFixed(2)}); }
+              const w0 = clamp(ph.t0 + a, ph.t0, ph.t1), w1 = clamp(ph.t0 + b, w0, ph.t1);   // a word can't fall outside the phrase it was heard in
+              words.push({text:c.text, ph:i, t0: +w0.toFixed(2), t1: +w1.toFixed(2)}); }
           } else {
             const r = await asr(seg, opts); const txt = (r && r.text || '').trim();
             if (!txt || HALLU.test(txt)) continue;
@@ -4501,6 +4550,7 @@ const Analyzer = {
       check();
       // 5) assemble
       J.step('asm');
+      words = fixWordTimes(words);
       const raw = AN_assemble({title: song.title, artist: song.artist, chords, words, duration: dur});
       const fresh = S.songs.get(id) || song;
       const hadText = !!(fresh.raw && fresh.raw.trim());
@@ -4562,7 +4612,7 @@ function openSettings(){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v8</b> (22-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v10</b> (22-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
