@@ -57,7 +57,7 @@ header{grid-column:1/3;display:flex;align-items:center;gap:10px;padding:0 14px;b
 /* Lyrics */
 main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:column;min-height:0}
 #lyricsWrap{flex:1;min-height:0;position:relative}
-#lyrics{position:absolute;inset:0;overflow-y:auto;padding:28px 40px 0;scrollbar-width:thin}
+#lyrics{position:absolute;inset:0;overflow-y:auto;padding:28px 40px 0 52px;scrollbar-width:thin}
 #lyrics::after{content:"";display:block;height:70vh}
 #guide{position:absolute;left:0;right:0;top:33%;height:calc(var(--lyric-size)*2.7);transform:translateY(-50%);background:var(--guide);pointer-events:none;border-top:1px dashed transparent}
 .song{font-size:var(--lyric-size);max-width:1100px;color:var(--lyric)}
@@ -79,6 +79,18 @@ main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:colu
 .lyricsbar .group button{font-size:13px}
 .ln[data-t]{border-left:3px solid transparent;margin-left:-14px;padding-left:11px;border-radius:2px;transition:border-color .2s}
 .ln.now{border-left-color:var(--chord)}
+#lyrics{overflow-x:hidden}
+.hl1 .ln[data-t],.hl2 .ln[data-t]{transform-origin:0 60%;transition:transform .35s ease,opacity .35s ease,-webkit-text-stroke-width .35s ease,border-color .2s}
+.hl1 .ln.now{transform:scale(1.06);-webkit-text-stroke:.022em currentColor;paint-order:stroke fill}
+.hl2 .ln.now{transform:scale(1.12);-webkit-text-stroke:.032em currentColor;paint-order:stroke fill}
+.hl2 .ln[data-t]:not(.now){opacity:.62}
+.editing .ln.now{transform:none!important;-webkit-text-stroke:0!important}
+.editing .ln[data-t]{opacity:1!important}
+.plbar{display:flex;gap:6px;align-items:center;margin:0 0 8px}
+.plbar select{flex:1;min-width:0;font-size:13px}
+.pllist{display:flex;flex-direction:column;gap:6px}
+.pllist .row{padding:8px 10px;border:1px solid var(--border);border-radius:10px}
+.pllist .row.act{border-color:var(--accent);background:var(--accent-soft)}
 .editing #guide{display:none}
 .editing #lyrics{padding-left:58px}
 .editing #lyrics .ch[data-ci]{cursor:grab;border-radius:5px;transition:background .12s, box-shadow .12s}
@@ -121,6 +133,13 @@ main{grid-row:2;grid-column:1;position:relative;display:flex;flex-direction:colu
 .eplayer .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--accent);width:0}
 .editbar b{color:var(--accent)}
 .vox{display:flex;align-items:center;gap:6px;font-size:12px}
+.dsel{font-size:12px;padding:3px 6px}
+.ln[data-t]{position:relative}
+.vtag{position:absolute;left:-42px;top:auto;bottom:.15em;font-size:15px;font-weight:700;line-height:1;padding:3px 5px;border-radius:999px;border:1px solid var(--border);background:var(--surface);cursor:pointer;opacity:.85}
+.vtag.vm{color:#3b82f6}.vtag.vf{color:#e0559a}.vtag.vb{color:var(--muted)}
+.ln.mine{background:linear-gradient(90deg,var(--accent-soft),transparent 70%);border-radius:6px}
+#btnFade.pulse{animation:vpulse 1s ease-in-out infinite}
+@keyframes vpulse{50%{filter:brightness(1.18);box-shadow:0 0 0 4px var(--accent-soft)}}
 .vox button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .vox button{white-space:nowrap;padding:4px 8px}
 .vox button.off{color:var(--muted);border-style:dashed}
@@ -243,7 +262,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v15 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v15</span></div>
+  <div class="brand" title="Escenario v17 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v17</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -307,17 +326,19 @@ footer.collapsed .fbody{display:none}
     <div class="fade" id="fadeBox">
       <button class="primary" id="btnFade">Transicionar ⇢ <kbd style="color:inherit;border-color:currentColor">T</kbd></button>
       <div class="fadeprog"><i id="fadeProg"></i></div>
-      <div class="row" style="font-size:12px">
+      <div class="row" style="font-size:12px;flex-wrap:wrap;row-gap:4px">
         <span class="muted">Fundido</span>
         <input type="range" id="fadeSec" min="1" max="20" step="1" class="grow">
         <span id="fadeSecVal" style="width:28px">6s</span>
         <label class="row" title="Empieza el fundido automáticamente antes de que termine la pista"><input type="checkbox" id="autoFade"> Auto</label>
+        <label class="row" title="Al transicionar, la siguiente canción entra en un loop de su ritmo hasta que pises T otra vez"><input type="checkbox" id="vampOn"> Vamp</label>
       </div>
     </div>
     <div class="deck" id="deck1"></div>
   </div>
   <div class="sect">
     <h3>Setlist <span class="grow"></span><button class="ghost" id="btnAddSet" style="font-size:12px;text-transform:none;letter-spacing:0">+ Añadir</button></h3>
+    <div class="plbar"><select id="plSel" title="Listas guardadas (música suave, bailable, bachata…)"></select><button class="ghost" id="plMenu" title="Administrar listas">⋯</button></div>
     <ul class="setlist" id="setlist"></ul>
   </div>
 </aside>
@@ -2723,12 +2744,20 @@ const DB = {
 
 /* ================= State ================= */
 const S = {
-  songs: new Map(), setlist: [], curId: null,
-  settings: { theme:'auto', fontSize:24, notation:'orig', chordColor:null, lyricColor:null, aiLang:'spanish', aiQuality:'small', aiBacking:true, fadeSec:6, autoFade:false, latencyMs:null, micCh:'mix', micDev:'', footer:true },
+  songs: new Map(), setlist: [], curId: null, playlists: [], plActive: null,
+  settings: { theme:'auto', fontSize:24, notation:'orig', chordColor:null, lyricColor:null, aiLang:'spanish', aiQuality:'small', aiBacking:true, fadeSec:6, autoFade:false, latencyMs:null, micCh:'mix', micDev:'', footer:true, hlLine:1, vamp:true, vampBars:2 },
   scrollMode:'auto', speed:1, userOffset:0, nudge:0, lastSet:null, fading:false
 };
 function saveSettings(){ DB.kvSet('settings', S.settings); }
-function saveSetlist(){ DB.kvSet('setlist', S.setlist); DB.kvSet('curId', S.curId); }
+function saveSetlist(){
+  DB.kvSet('setlist', S.setlist); DB.kvSet('curId', S.curId);
+  // the setlist is the active list: keep it saved (not while applying changes that came from another device)
+  const pl = S.plActive && S.playlists.find(p => p.id === S.plActive && !p.del);
+  if (pl && !(typeof CLOUD !== 'undefined' && CLOUD.muted) && JSON.stringify(pl.songs) !== JSON.stringify(S.setlist)){ pl.songs = [...S.setlist]; pl.at = Date.now(); savePlaylists(); }
+  if (typeof renderPlaylists === 'function') renderPlaylists();
+}
+function savePlaylists(){ DB.kvSet('playlists', S.playlists); }
+function savePlActive(){ DB.kvSet('plActive', S.plActive); }
 async function saveSong(song){ S.songs.set(song.id, song); await DB.put('songs', song); }
 
 /* ================= Audio core ================= */
@@ -2855,6 +2884,7 @@ class Deck {
         <input type="range" class="vvol grow" min="0" max="1" step="0.01" title="Volumen de la voz principal"><span class="muted vlab"></span></div>
       <div class="vox bvox hidden"><button class="bbtn" title="Silenciar / activar los coros (tecla C)">👥 Coros</button>
         <input type="range" class="bvol grow" min="0" max="1.2" step="0.01" title="Volumen de los coros"><span class="muted blab"></span></div>
+      <div class="vox dvox hidden"><select class="dsel grow" title="Dueto: quita la voz de uno de los cantantes para cantar su parte"><option value="">👫 Dueto: dejar las dos voces</option><option value="m">🎤 Quitar la voz de él (la canto yo)</option><option value="f">🎤 Quitar la voz de ella (la canto yo)</option></select></div>
       <div class="ytwrap hidden"><div class="yt"><div></div></div></div>
       <div class="bar" title="Clic para saltar"><i></i><b class="m1 hidden"></b><b class="m2 hidden"></b></div>
       <div class="row">
@@ -2867,7 +2897,8 @@ class Deck {
     this.$ = {role:$('.role',this.el), st:$('.st',this.el), title:$('.title',this.el), ytwrap:$('.ytwrap',this.el), yt:$('.yt',this.el),
       bar:$('.bar',this.el), prog:$('.bar i',this.el), m1:$('.m1',this.el), m2:$('.m2',this.el), play:$('.play',this.el), stop:$('.stop',this.el), vol:$('.vol',this.el), time:$('.time',this.el),
       vox:$('.vox',this.el), vbtn:$('.vbtn',this.el), vvol:$('.vvol',this.el), vlab:$('.vlab',this.el),
-      bvox:$('.bvox',this.el), bbtn:$('.bbtn',this.el), bvol:$('.bvol',this.el), blab:$('.blab',this.el)};
+      bvox:$('.bvox',this.el), bbtn:$('.bbtn',this.el), bvol:$('.bvol',this.el), blab:$('.blab',this.el), dvox:$('.dvox',this.el), dsel:$('.dsel',this.el)};
+    this.$.dsel.onchange = () => setDuet(this, this.$.dsel.value);
     this.$.play.onclick = () => this.toggle();
     this.$.stop.onclick = () => { this.pause(); this.seek(0); };
     this.$.vol.oninput = () => { this.vol = +this.$.vol.value; this.applyLevel(); };
@@ -2892,6 +2923,7 @@ class Deck {
   get eTime(){ return o2e(this.time, this.cuts); }                             // position as heard
   get time(){
     if (this.kind === 'file'){
+      if (this.vamp && (!this.vamp.rel || ctx.currentTime < this.vamp.rel)){ const v = this.vamp; return v.a + (Math.max(0, ctx.currentTime - v.t0) % v.L); }
       if (!this.playing) return this.offset;
       const c = this.cuts, e = this.eStart + Math.max(0, ctx.currentTime - this.startCtx);
       return Math.min(e2o(e, c), this.buf ? this.buf.duration : 1e9);
@@ -2902,7 +2934,7 @@ class Deck {
   setStatus(s, warn){ this.status = s; this.$.st.textContent = s; this.$.st.classList.toggle('hidden', !s); this.$.st.classList.toggle('warn', !!warn); }
   voiceGain(){ const s = this.song; return !s || s.voiceMuted ? 0 : (s.voiceVol ?? 1); }
   backGain(){ const s = this.song; return !s || s.backMuted ? 0 : (s.backVol ?? 1); }
-  roleGain(role){ return role === 'voc' ? this.voiceGain() : role === 'back' ? this.backGain() : 1; }
+  roleGain(role, t){ return role === 'voc' ? this.voiceGain() * duetFactor(this.song, t ?? this.time) : role === 'back' ? this.backGain() : 1; }
   get hasBacking(){ return this.hasStems && !!this.song.stems.back; }
   applyVoice(){
     for (const o of this.srcs) if (o.role !== 'inst') o.g.gain.setTargetAtTime(this.roleGain(o.role), ctx.currentTime, 0.03);
@@ -2923,6 +2955,8 @@ class Deck {
     if (hb){ const bm = this.song.backMuted;
       this.$.bbtn.className = 'bbtn ' + (bm ? 'off' : 'on'); this.$.bbtn.textContent = bm ? '👥 Sin coros' : '👥 Coros';
       this.$.bvol.value = this.song.backVol ?? 1; this.$.blab.textContent = bm ? 'apagados' : Math.round((this.song.backVol ?? 1) * 100) + '%'; }
+    this.$.dvox.classList.toggle('hidden', !/\{time\s*:/i.test(this.song.raw || ''));
+    this.$.dsel.value = this.song.duet || '';
   }
   async load(song){
     const tok = ++this.token;
@@ -2987,15 +3021,15 @@ class Deck {
     if (this.kind === 'yt' && this.yt && this.yt.setVolume) { try { this.yt.setVolume(Math.round(v*100)); } catch(e){} }
   }
   setLevel(x){ this.level = x; this.applyLevel(); }
-  startAt(t, xfade){
+  startAt(t, xfade, at0){
     audio(); this.ensureOut();
-    const old = this.srcs, now = ctx.currentTime, when = now + 0.03, dur = this.buf.duration, cuts = this.cuts;
+    const old = this.srcs, now = ctx.currentTime, when = at0 ?? now + 0.03, dur = this.buf.duration, cuts = this.cuts;
     const off = snapOut(clamp(t, 0, Math.max(0, dur - 0.05)), cuts), eStart = o2e(off, cuts);
     // schedule every kept segment back to back (sample-accurate), with tiny fades at each join
     const segs = keepSegs(cuts, dur).filter(([a, b]) => b > off + 0.01).map(([a, b]) => [Math.max(a, off), b]);
     const F = 0.008;
     const news = this.bufs.map(({buf, role}) => {
-      const g = ctx.createGain(), v = this.roleGain(role), voc = role === 'voc';
+      const g = ctx.createGain(), v = this.roleGain(role, off), voc = role === 'voc';
       g.gain.setValueAtTime(xfade ? 0 : v, now);
       if (xfade) g.gain.linearRampToValueAtTime(v, when + 0.04);
       g.connect(this.out);
@@ -3026,6 +3060,7 @@ class Deck {
   }
   pause(){
     if (!this.playing) return;
+    if (this.vamp){ const v = this.vamp; this.cancelVamp(); if (!v.rel || ctx.currentTime < v.rel){ this.stopSrc(); this.offset = v.a; this.playing = false; this.render(); return; } }
     if (this.kind === 'file'){ const t = this.time; this.stopSrc(); this.offset = t; }
     else if (this.kind === 'yt'){ try { this.yt.pauseVideo(); } catch(e){} }
     else { this.offset = this.time; }
@@ -3033,6 +3068,7 @@ class Deck {
   }
   stopSrc(){ for (const o of this.srcs){ try { o.g.gain.setTargetAtTime(0, ctx.currentTime, 0.01); (o.ss || [o.s]).forEach(x => x.stop(ctx.currentTime + 0.08)); } catch(e){} } this.srcs = []; }
   stop(silent){
+    this.cancelVamp && this.cancelVamp();
     if (this.kind === 'file') this.stopSrc();
     if (this.kind === 'yt' && this.yt && this.yt.stopVideo) { try { this.yt.stopVideo(); } catch(e){} }
     this.playing = false; this.offset = 0; if (!silent) this.render();
@@ -3040,6 +3076,7 @@ class Deck {
   toggle(){ this.playing ? this.pause() : this.play(); }
   seek(t){
     t = snapOut(Math.max(0, t), this.cuts);
+    if (this.vamp){ const was = this.playing; this.cancelVamp(); this.stopSrc(); this.playing = false; if (was && this.kind === 'file'){ this.startAt(t, true); this.render(); return; } }
     if (this.kind === 'file'){ if (this.playing) this.startAt(t, true); else this.offset = t; }
     else if (this.kind === 'yt'){ try { this.yt.seekTo(t, true); } catch(e){} }
     else { this.offset = t; this.clockStart = performance.now(); }
@@ -3056,6 +3093,10 @@ class Deck {
     this.tick();
   }
   tick(){
+    if (this.kind === 'file' && this.playing && this.song && this.song.duet && this.song.voices && !this.vamping){
+      const g = this.roleGain('voc', this.time + 0.06);
+      if (g !== this._dv){ this._dv = g; for (const o of this.srcs) if (o.role === 'voc') o.g.gain.setTargetAtTime(g, ctx.currentTime, 0.035); }
+    } else this._dv = null;
     // YouTube can't be scheduled: jump over cut ranges as soon as playback enters one
     if (this.kind === 'yt' && this.playing && this.yt && this.yt.seekTo){ const c = this.cuts, t = this.time; for (const [a, b] of c) if (t >= a && t < b - 0.3){ try { this.yt.seekTo(b, true); } catch(e){} break; } }
     const d = this.eDuration, t = this.eTime;
@@ -3153,7 +3194,7 @@ function renderLyrics(keepRatio){
   }
   el.innerHTML = songHTML(song, {edit: CE.on});
   S.timed = $$('.ln[data-t]', el).map(e => ({t: +e.dataset.t, el: e})).sort((a, b) => a.t - b.t);
-  if (CE.on) ceTapMark();
+  if (CE.on) ceTapMark(); else markVoices();
   S.nowLine = null;
   $('#hTitle').textContent = song.title || 'Sin título';
   $('#hArtist').textContent = song.artist || '';
@@ -3168,7 +3209,7 @@ function applyColors(){
   S.settings.chordColor ? r.setProperty('--chord', S.settings.chordColor) : r.removeProperty('--chord');
   S.settings.lyricColor ? r.setProperty('--lyric', S.settings.lyricColor) : r.removeProperty('--lyric');
 }
-function applyFont(){ document.documentElement.style.setProperty('--lyric-size', S.settings.fontSize + 'px'); }
+function applyFont(){ document.documentElement.style.setProperty('--lyric-size', S.settings.fontSize + 'px'); const l = $('#lyrics'); if (l){ l.classList.toggle('hl1', S.settings.hlLine === 1); l.classList.toggle('hl2', S.settings.hlLine === 2); } }
 function applyTheme(){
   const t = S.settings.theme === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : S.settings.theme;
   document.documentElement.dataset.theme = t;
@@ -3613,13 +3654,18 @@ async function transition(){
   if (S.fading) return;
   if (CE.on) exitChordEdit();
   const A = DECK_CUR(), B = DECK_NEXT();
+  if (A.vamping){ A.vampRelease(); return; }   // second press: into the song, on the next bar
   if (!B.song){ toast('Elige la siguiente canción en el setlist.'); return; }
   if (B.kind === 'file' && !B.buf){ toast('La siguiente pista aún se está preparando…'); return; }
   S.fading = true;
   const fade = A.playing ? S.settings.fadeSec : 0.3;
   B.setLevel(A.playing ? 0 : 1);
-  if (!B.playing){ B.offset = 0; await B.play(); }
-  curDeckIdx = 1 - curDeckIdx;
+  if (!B.playing){
+    let plan = null;
+    if (S.settings.vamp && B.kind === 'file'){ try { plan = await B.vampPlan(); } catch(e){ console.warn('vamp', e); } if (!plan) toast('No encontré un ritmo claro para el vamp; entra la canción directamente.'); }
+    if (plan) B.startVamp(plan); else { B.offset = 0; await B.play(); }
+  }
+  curDeckIdx = 1 - curDeckIdx; updateFadeBtn();
   S.curId = B.song.id; saveSetlist();
   renderLyrics(); DECKS.forEach(d => d.render()); renderSetlist();
   const t0 = performance.now(), prog = $('#fadeProg');
@@ -3633,7 +3679,7 @@ async function transition(){
     step();
   });
   A.stop(); A.setLevel(1); prog.style.width = '0';
-  S.fading = false;
+  S.fading = false; updateFadeBtn();
   const nx = nextInSetlist(S.curId);
   await A.load(nx ? S.songs.get(nx) : null);
   DECKS.forEach(d => d.render()); renderSetlist(); prunePitchCache();
@@ -3703,7 +3749,7 @@ function openLibrary(){
     const songs = [...S.songs.values()].filter(s => !q || (s.title + ' ' + (s.artist||'')).toLowerCase().includes(q)).sort((a,b) => a.title.localeCompare(b.title, 'es'));
     $('#libList', m.el).innerHTML = songs.length ? songs.map(s => `<div class="libitem" data-id="${s.id}">
         <div class="t"><b>${esc(s.title)}</b><span class="muted">${esc(s.artist||'')} ${s.key ? '· ' + esc(s.key) : ''}</span></div>${trackIcon(s)}
-        ${S.setlist.includes(s.id) ? '<span class="chip">En setlist</span>' : '<button data-a="add">+ Setlist</button>'}
+        ${S.setlist.includes(s.id) ? '<span class="chip">En ' + (S.plActive && S.playlists.find(p => p.id === S.plActive) ? esc(S.playlists.find(p => p.id === S.plActive).name) : 'setlist') + '</span>' : '<button data-a="add">+ ' + (S.plActive && S.playlists.find(p => p.id === S.plActive) ? esc(S.playlists.find(p => p.id === S.plActive).name) : 'Setlist') + '</button>'}
         <button data-a="now">Abrir</button><button data-a="edit">✎</button><button data-a="del" title="Eliminar">🗑</button></div>`).join('')
       : '<p class="muted">No hay canciones todavía.</p>';
   };
@@ -3728,6 +3774,8 @@ async function deleteSong(id){
   S.songs.delete(id); await DB.del('songs', id);
   if (s && s.track && s.track.assetId && ![...S.songs.values()].some(x => x.track && x.track.assetId === s.track.assetId)) await DB.del('assets', s.track.assetId);
   if (s && s.stems){ for (const a of [s.stems.inst, s.stems.voc, s.stems.back].filter(Boolean)) await DB.del('assets', a); }
+  for (const p of S.playlists) if (p.songs.includes(id)){ p.songs = p.songs.filter(x => x !== id); p.at = Date.now(); }
+  savePlaylists();
   S.setlist = S.setlist.filter(x => x !== id); saveSetlist();
   for (const d of DECKS) if (d.song && d.song.id === id) await d.load(null);
   if (S.curId === id){ S.curId = S.setlist[0] || null; await setCurrent(S.curId); }
@@ -4688,13 +4736,354 @@ const Analyzer = {
 };
 function renderLyricsIfCur(id){ if (S.curId === id) renderLyrics(true); }
 
+/* ================= Beat analysis (for the vamp) ================= */
+const BEAT = {
+  mono(buf){   // ~22 kHz mono
+    const f = Math.max(1, Math.round(buf.sampleRate / 22050)), n = Math.floor(buf.length / f), x = new Float32Array(n);
+    const chs = []; for (let c = 0; c < buf.numberOfChannels; c++) chs.push(buf.getChannelData(c));
+    const k = 1 / (f * chs.length);
+    for (let i = 0; i < n; i++){ let s = 0; const j = i * f; for (const ch of chs) for (let q = 0; q < f; q++) s += ch[j + q]; x[i] = s * k; }
+    return {x, sr: buf.sampleRate / f};
+  },
+  fft(re, im){
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++){ let b = n >> 1; for (; j & b; b >>= 1) j ^= b; j ^= b; if (i < j){ let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let len = 2; len <= n; len <<= 1){
+      const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len){ let cr = 1, ci = 0;
+        for (let j = 0; j < len / 2; j++){ const a = i + j, b = a + len / 2, xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr;
+          re[b] = re[a] - xr; im[b] = im[a] - xi; re[a] += xr; im[a] += xi; const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t; } }
+    }
+  },
+  // spectral-flux onset strength between t0 and t1 (seconds), one value per hop
+  onset(m, hop, t0=0, t1=null){
+    const N = 1024, {x, sr} = m, s0 = Math.max(0, Math.floor(t0 * sr)), s1 = Math.min(x.length - N, Math.floor((t1 ?? x.length / sr) * sr));
+    const nf = Math.max(0, Math.floor((s1 - s0) / hop)), env = new Float32Array(nf);
+    const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+    const re = new Float32Array(N), im = new Float32Array(N), prev = new Float32Array(N / 2), kmax = Math.min(N / 2, Math.round(8000 / sr * N)), klow = Math.round(220 / sr * N);
+    for (let f = 0; f < nf; f++){
+      const o = s0 + f * hop; for (let i = 0; i < N; i++){ re[i] = x[o + i] * win[i]; im[i] = 0; }
+      this.fft(re, im); let fl = 0;
+      for (let k = 1; k < kmax; k++){ const mg = Math.log1p(100 * Math.hypot(re[k], im[k])); const d = mg - prev[k]; if (d > 0) fl += k < klow ? 6 * d : d; prev[k] = mg; }   // kick and bass mark the beat
+      env[f] = f ? fl : 0;
+    }
+    // remove slow trend, keep the peaks
+    const w = Math.max(3, Math.round(sr / hop * 0.25)), out = new Float32Array(nf); let acc = 0;
+    for (let i = 0; i < nf; i++){ acc += env[i]; if (i >= w) acc -= env[i - w]; const mean = acc / Math.min(i + 1, w); out[i] = Math.max(0, env[i] - mean); }
+    return {env: out, fps: sr / hop, t0: s0 / sr + 0.03};   // +30 ms: a hit shows up in the flux slightly before it sounds
+  },
+  interp(a, x){ const i = Math.floor(x), f = x - i; return i < 0 || i + 1 >= a.length ? 0 : a[i] * (1 - f) + a[i + 1] * f; },
+  // global tempo + beat phase. Returns {period (s), phase (s of a beat), bpm, conf}
+  tempo(o){
+    const {env, fps} = o, n = env.length;
+    const lo = Math.floor(fps * 60 / 200), hi = Math.ceil(fps * 60 / 60), ac = new Float32Array(hi * 8 + 2);
+    for (let L = 1; L < ac.length; L++){ let s = 0; for (let i = 0; i + L < n; i++) s += env[i] * env[i + L]; ac[L] = s / (n - L); }
+    let best = 0, bp = 0;
+    for (let L = lo; L <= hi; L++){
+      const bpm = 60 * fps / L, w = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 115) / 0.9, 2));   // mild preference around 115 BPM
+      const s = (ac[L] + 0.5 * this.interp(ac, 2 * L) + 0.33 * this.interp(ac, 4 * L)) * w; if (s > best){ best = s; bp = L; }
+    }
+    if (!bp) return null;
+    let P = bp, bs = -1;   // refine with the harmonics (sub-frame)
+    for (let p = bp * 0.97; p <= bp * 1.03; p += 0.02){ let s = 0; for (let m = 1; m <= 8; m++) s += this.interp(ac, m * p); if (s > bs){ bs = s; P = p; } }
+    let ph = 0, pb = -1;
+    for (let f = 0; f < P; f += 0.5){ let s = 0; for (let x = f; x < n; x += P) s += this.interp(env, x); if (s > pb){ pb = s; ph = f; } }
+    let mean = 0; for (let i = 0; i < n; i++) mean += env[i]; mean /= n || 1;
+    return {period: P / fps, phase: o.t0 + ph / fps, bpm: 60 * fps / P, conf: pb / (n / P) / (mean || 1)};
+  },
+  // beat phase near time t (local drift)
+  localPhase(o, period, t, span){
+    const {env, fps} = o, P = period * fps, a = Math.max(0, (t - span - o.t0) * fps), b = Math.min(env.length - 1, (t - o.t0) * fps);
+    let best = -1, ph = 0;
+    for (let f = 0; f < P; f += 0.25){ let s = 0; for (let x = a + f; x < b; x += P) s += this.interp(env, x); if (s > best){ best = s; ph = f; } }
+    return o.t0 + (a + ph) / fps;
+  }
+};
+const beatCache = new Map();   // assetId -> {m, glob}
+
+/* ================= Vamp: loop a few bars of the next song while you get ready ================= */
+function firstVocalTime(song){
+  try { const ls = parseSong(song.raw || '').lines.filter(l => l.t != null && l.type !== 'section'); if (ls.length) return Math.min(...ls.map(l => l.t)); } catch(e){}
+  const ph = song.analysis && song.analysis.phrases; if (ph && ph.length) return ph[0].t0;
+  return null;
+}
+Object.defineProperty(Deck.prototype, 'vamping', {get(){ return !!(this.vamp && !this.vamp.rel); }});
+Object.assign(Deck.prototype, {
+  async vampPlan(){
+    if (this.kind !== 'file' || !this.bufs.length) return null;
+    const inst = (this.bufs.find(b => b.role === 'inst') || this.bufs[0]).buf, dur = inst.duration;
+    const key = inst;   // per pitched buffer
+    let c = beatCache.get(key);
+    if (!c){ const m = BEAT.mono(inst); const o = BEAT.onset(m, 256); c = {m, o, glob: BEAT.tempo(o)}; beatCache.set(key, c); if (beatCache.size > 6) beatCache.delete(beatCache.keys().next().value); }
+    const g = c.glob; if (!g || !isFinite(g.period)) return null;
+    const P = g.period, bars = S.settings.vampBars || 2, cuts = this.cuts, segs = keepSegs(cuts, dur);
+    const V = firstVocalTime(this.song);
+    let plan = null;
+    for (const nb of [bars * 4, 4]){
+      if (V == null || plan) break;
+      const seg = segs.find(([x, y]) => x <= V - 0.2 && y > V - 0.2) || segs.find(([x, y]) => y <= V && y - x > nb * P);
+      if (!seg) break;
+      const end = Math.min(V - 0.12, seg[1]);
+      const ph = BEAT.localPhase(c.o, P, end, Math.min(16 * P, end - seg[0]));
+      const b = ph + Math.floor((end - ph) / P + 1e-6) * P, a = b - nb * P;
+      if (a >= seg[0] + 0.03 && b > a) plan = {a, b, beats: nb, mode: 'intro'};
+    }
+    if (!plan){   // intro too short or cut: loop the most rhythmic stretch with only the instrumental, then start the song from its first beat
+      const nb = bars * 4, L = nb * P; let best = -1;
+      for (const [x, y] of segs){
+        const ph = BEAT.localPhase(c.o, P, Math.min(y, x + 30), Math.min(30, y - x));
+        for (let a = ph + Math.ceil((x + 0.05 - ph) / P) * P; a + L < Math.min(y, dur * 0.75); a += P * 2){
+          let s = 0; const i0 = Math.floor((a - c.o.t0) * c.o.fps), i1 = Math.floor((a + L - c.o.t0) * c.o.fps);
+          for (let i = i0; i < i1; i++) s += c.o.env[i] || 0;
+          if (s > best){ best = s; plan = {a, b: a + L, beats: nb, mode: 'jump'}; }
+        }
+      }
+      if (!plan) return null;
+      const s0 = segs[0] ? segs[0][0] : 0, ph0 = BEAT.localPhase(c.o, P, s0 + 8 * P, 8 * P);
+      plan.entry = Math.max(s0, ph0 + Math.ceil((s0 - ph0) / P - 1e-6) * P);
+    }
+    // fine-tune the loop length so the restart lands exactly where the music continues
+    const hop = 64, fine = BEAT.onset(c.m, hop, Math.max(0, plan.a - 0.3), Math.min(dur, plan.b + (plan.b - plan.a) + 0.3)), fps = fine.fps;
+    const L0 = (plan.b - plan.a) * fps, at = (t) => (t - fine.t0) * fps;
+    let bestL = L0, bs = -1;
+    for (let L = L0 * 0.985; L <= L0 * 1.015; L += 0.5){
+      let s = 0, n = 0;
+      if (plan.mode === 'intro'){ const b = at(plan.b); for (let i = 0; i < L; i++){ s += BEAT.interp(fine.env, b - L + i) * BEAT.interp(fine.env, b + i); n++; } }
+      else { const a = at(plan.a); for (let i = 0; i < L; i++){ s += BEAT.interp(fine.env, a + i) * BEAT.interp(fine.env, a + L + i); n++; } }
+      s /= n || 1; if (s > bs){ bs = s; bestL = L; }
+    }
+    const L = bestL / fps;
+    if (plan.mode === 'intro') plan.a = plan.b - L; else plan.b = plan.a + L;
+    plan.L = L; plan.bpm = Math.round(60 / (L / plan.beats));
+    return plan;
+  },
+  startVamp(plan){
+    audio(); this.ensureOut(); this.stopSrc();
+    const now = ctx.currentTime, t0 = now + 0.05, X = 0.015;
+    const srcs = this.bufs.map(({buf, role}) => {
+      const sr = buf.sampleRate, n = Math.round(plan.L * sr), s0 = Math.round(plan.a * sr), xn = Math.min(Math.round(X * sr), s0, n >> 2);
+      const lb = ctx.createBuffer(buf.numberOfChannels, n, sr);
+      for (let ch = 0; ch < buf.numberOfChannels; ch++){
+        const src = buf.getChannelData(ch), out = lb.getChannelData(ch);
+        out.set(src.subarray(s0, s0 + n));
+        for (let i = 0; i < xn; i++){ const k = (i + 0.5) / xn, j = n - xn + i;   // blend the loop's tail into what precedes its start → seamless seam
+          out[j] = out[j] * Math.cos(k * Math.PI / 2) + src[s0 - xn + i] * Math.sin(k * Math.PI / 2); }
+      }
+      const s = ctx.createBufferSource(); s.buffer = lb; s.loop = true;
+      const gn = ctx.createGain(), v = plan.mode === 'intro' ? this.roleGain(role) : (role === 'inst' ? 1 : 0);
+      gn.gain.setValueAtTime(0, now); gn.gain.linearRampToValueAtTime(v, t0 + 0.03);
+      s.connect(gn).connect(this.out); s.start(t0);
+      return {s, g: gn, role};
+    });
+    this.vamp = {...plan, t0, srcs, rel: null};
+    this.playing = true; this.offset = plan.a; this.endedFired = false;
+    this.setStatus(`🔁 Vamp · ${plan.bpm} BPM`);
+    this.render(); updateFadeBtn();
+  },
+  vampRelease(){
+    const v = this.vamp; if (!v || v.rel) return;
+    const now = ctx.currentTime, n = Math.max(1, Math.ceil((now + 0.12 - v.t0) / v.L)), tb = v.t0 + n * v.L;
+    v.rel = tb;
+    for (const o of v.srcs){ o.g.gain.setValueAtTime(o.g.gain.value, tb - 0.004); o.g.gain.linearRampToValueAtTime(0, tb + 0.008); try { o.s.stop(tb + 0.05); } catch(e){} }
+    this.startAt(v.mode === 'intro' ? v.b : v.entry, false, tb);
+    this.setStatus('Entrando en ' + Math.max(0, tb - now).toFixed(1) + ' s…');
+    setTimeout(() => { if (this.vamp === v){ this.vamp = null; this.setStatus(''); updateFadeBtn(); this.render(); } }, (tb - now) * 1000 + 80);
+    updateFadeBtn();
+  },
+  cancelVamp(){ const v = this.vamp; if (!v) return; for (const o of v.srcs){ try { o.g.gain.setTargetAtTime(0, ctx.currentTime, 0.01); o.s.stop(ctx.currentTime + 0.08); } catch(e){} } this.vamp = null; this.setStatus(''); updateFadeBtn(); }
+});
+function updateFadeBtn(){
+  const b = $('#btnFade'); if (!b) return;
+  const v = DECK_CUR() && DECK_CUR().vamping;
+  b.innerHTML = v ? 'Entrar a la canción ⇢ <kbd style="color:inherit;border-color:currentColor">T</kbd>' : 'Transicionar ⇢ <kbd style="color:inherit;border-color:currentColor">T</kbd>';
+  b.classList.toggle('pulse', !!v);
+}
+
+/* ================= Duets: tell his lines from hers by pitch, then mute one of them ================= */
+const VOICE_NAMES = {m: 'él', f: 'ella', b: 'ambos'};
+function yinF0(x, sr, o, W, minLag, maxLag, d){
+  for (let t = 1; t <= maxLag; t++){ let s = 0; for (let i = 0; i < W; i++){ const q = x[o + i] - x[o + i + t]; s += q * q; } d[t] = s; }
+  let run = 0; d[0] = 1;
+  for (let t = 1; t <= maxLag; t++){ run += d[t]; d[t] = run ? d[t] * t / run : 1; }
+  for (let t = minLag; t < maxLag; t++){
+    if (d[t] < 0.18){ while (t + 1 < maxLag && d[t + 1] < d[t]) t++;
+      const a = d[t - 1], b = d[t], c = d[t + 1], den = a - 2 * b + c, sh = den ? 0.5 * (a - c) / den : 0;
+      return {f0: sr / (t + sh), ap: b}; }
+  }
+  return null;
+}
+async function detectVoices(song, onProg){
+  if (!song.stems || !song.stems.voc) throw new Error('Primero analiza la canción para separar la voz');
+  const buf = await decodeAsset(song.stems.voc);
+  const m = BEAT.mono(buf), sr = m.sr, x = m.x;   // ~22 kHz
+  // decimate to ~11 kHz for speed
+  const y = new Float32Array(x.length >> 1); for (let i = 0; i < y.length; i++) y[i] = 0.5 * (x[2 * i] + x[2 * i + 1]); const fs = sr / 2;
+  const lines = parseSong(song.raw || '').lines.filter(l => l.t != null && l.type !== 'section').map(l => l.t).sort((a, b) => a - b);
+  if (lines.length < 2) throw new Error('La canción necesita tiempos por línea (analízala o márcalos)');
+  const W = 512, hop = 256, minLag = Math.floor(fs / 900), maxLag = Math.ceil(fs / 70), d = new Float32Array(maxLag + 2);
+  // loudness gate
+  let peak = 0; const rmsAt = o => { let s = 0; for (let i = 0; i < W; i++) s += y[o + i] * y[o + i]; return Math.sqrt(s / W); };
+  for (let o = 0; o + W < y.length; o += hop * 8) peak = Math.max(peak, rmsAt(o));
+  const gate = peak * 0.06;
+  const segs = lines.map((t, i) => ({t0: t, t1: i + 1 < lines.length ? lines[i + 1] : Math.min(buf.duration, t + 8), f: []}));
+  for (let si = 0; si < segs.length; si++){
+    const sg = segs[si];
+    for (let o = Math.floor(sg.t0 * fs); o + W + maxLag < y.length && o < sg.t1 * fs; o += hop){
+      if (rmsAt(o) < gate) continue;
+      const r = yinF0(y, fs, o, W, minLag, maxLag, d); if (r) sg.f.push(69 + 12 * Math.log2(r.f0 / 440));
+    }
+    if (si % 6 === 5){ onProg && onProg(si / segs.length); await new Promise(z => setTimeout(z, 0)); }
+  }
+  const med = a => { const s = [...a].sort((p, q) => p - q); return s[s.length >> 1]; };
+  for (const sg of segs){ const f = sg.f.filter((v, i, a) => i === 0 || Math.abs(v - a[i - 1]) < 7); sg.med = f.length >= 4 ? med(f) : null; sg.fr = f; }
+  const meds = segs.filter(s => s.med != null).map(s => s.med).sort((a, b) => a - b);
+  if (meds.length < 2) throw new Error('No encontré suficiente voz para separar las partes');
+  let cm = meds[Math.floor(meds.length * 0.2)], cf = meds[Math.floor(meds.length * 0.8)];
+  for (let it = 0; it < 20; it++){ const th = (cm + cf) / 2, A = meds.filter(v => v < th), B = meds.filter(v => v >= th); if (!A.length || !B.length) break;
+    cm = A.reduce((p, q) => p + q, 0) / A.length; cf = B.reduce((p, q) => p + q, 0) / B.length; }
+  const th = (cm + cf) / 2, gap = cf - cm;
+  const out = segs.map(sg => {
+    if (sg.med == null) return {t0: sg.t0, t1: sg.t1, w: null};
+    const lo = sg.fr.filter(v => v < th).length / sg.fr.length;
+    const w = sg.fr.length >= 10 && lo > 0.3 && lo < 0.7 ? 'b' : (lo >= 0.5 ? 'm' : 'f');
+    return {t0: +sg.t0.toFixed(2), t1: +sg.t1.toFixed(2), w};
+  });
+  return {segs: out, gap: +gap.toFixed(1), single: gap < 3.5};
+}
+function voiceAt(song, t){ const v = song && song.voices; if (!v) return null; for (const s of v.segs) if (t >= s.t0 && t < s.t1) return s.w; return null; }
+function duetFactor(song, t){ if (!song || !song.duet || !song.voices) return 1; const w = voiceAt(song, t); return w === song.duet ? 0 : w === 'b' ? 0.5 : 1; }
+async function setDuet(deck, mode){
+  const s = deck.song; if (!s) return;
+  if (mode && !s.voices){
+    deck.setStatus('Separando voces de él y de ella… 0%');
+    try { s.voices = await detectVoices(s, p => deck.setStatus('Separando voces de él y de ella… ' + Math.round(p * 100) + '%')); }
+    catch(e){ deck.setStatus(''); toast(e.message, 4500); deck.renderVox(); return; }
+    deck.setStatus('');
+    if (s.voices.single) toast('Parece que esta canción tiene una sola voz; revisa las marcas ♂/♀ en la letra.', 5000);
+  }
+  s.duet = mode || null; await saveSong(s);
+  deck.applyVoice(); if (deck.isCur) markVoices();
+  if (mode) toast((mode === 'm' ? 'Cantas tú la parte de él' : 'Cantas tú la parte de ella') + '. Toca ♂/♀ junto a una línea para corregirla.', 4500);
+}
+function markVoices(){
+  const s = curSong(); const el = $('#lyrics');
+  $$('.vtag', el).forEach(x => x.remove());
+  if (!s || !s.duet || !s.voices) return;
+  for (const {t, el: ln} of S.timed){
+    const w = voiceAt(s, t + 0.01); if (!w) continue;
+    const tag = document.createElement('button'); tag.className = 'vtag v' + w; tag.dataset.t = t;
+    tag.textContent = w === 'm' ? '♂' : w === 'f' ? '♀' : '⚭';
+    tag.title = (w === s.duet ? 'La cantas tú' : w === 'b' ? 'Cantan los dos (su voz queda a medio volumen)' : 'La canta la grabación') + ' · clic para cambiar (él → ella → ambos)';
+    if (w === s.duet) ln.classList.add('mine'); else ln.classList.remove('mine');
+    ln.prepend(tag);
+  }
+}
+document.addEventListener('click', async e => {
+  const tag = e.target.closest('.vtag'); if (!tag) return;
+  e.preventDefault(); e.stopPropagation();
+  const s = curSong(); if (!s || !s.voices) return;
+  const t = +tag.dataset.t + 0.01, sg = s.voices.segs.find(x => t >= x.t0 && t < x.t1); if (!sg) return;
+  sg.w = {m: 'f', f: 'b', b: 'm'}[sg.w] || 'm';
+  await saveSong(s); markVoices(); for (const d of DECKS) if (d.song && d.song.id === s.id){ d.song = s; d.applyVoice(); }
+}, true);
+
+
+/* ================= Saved lists (playlists) ================= */
+const plLive = () => S.playlists.filter(p => !p.del).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+function renderPlaylists(){
+  const sel = $('#plSel'); if (!sel) return;
+  const pls = plLive(), act = pls.find(p => p.id === S.plActive);
+  if (!act && S.plActive){ S.plActive = null; }
+  sel.innerHTML = (act ? '' : `<option value="">${S.setlist.length ? 'Setlist sin guardar' : 'Elige una lista…'}</option>`)
+    + pls.map(p => `<option value="${p.id}">${esc(p.name)} · ${p.songs.filter(id => S.songs.has(id)).length}</option>`).join('')
+    + (!act && S.setlist.length ? '<option value="__save">💾 Guardar este setlist como lista…</option>' : '')
+    + '<option value="__new">＋ Nueva lista vacía…</option>';
+  sel.value = act ? act.id : '';
+}
+function askName(title, def='', ok='Guardar', extra=''){
+  return new Promise(res => {
+    const m = modal(`<div class="mhead"><h2>${esc(title)}</h2></div><div class="mbody" style="flex-direction:column;gap:8px">${extra}
+      <input type="text" id="nmIn" value="${esc(def)}" placeholder="Ej.: Música suave, Bailable, Bachata…" style="width:100%"></div>
+      <div class="mfoot"><button data-r="0">Cancelar</button><button class="primary" data-r="1">${esc(ok)}</button></div>`, {wide:false});
+    const inp = $('#nmIn', m.el); setTimeout(() => { inp.focus(); inp.select(); }, 30);
+    let done = false; const fin = v => { if (done) return; done = true; m.close(); res(v); };
+    m.onClose = () => fin(null);
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); fin(inp.value.trim() || null); } });
+    m.el.addEventListener('click', e => { if (e.target.dataset.r != null) fin(e.target.dataset.r === '1' ? (inp.value.trim() || null) : null); });
+  });
+}
+function newPlaylist(name, songs){
+  const p = {id: 'p_' + uid(), name, songs: [...songs], at: Date.now(), created: Date.now()};
+  S.playlists.push(p); savePlaylists(); return p;
+}
+const unsavedSetlist = () => !S.plActive && S.setlist.length && !plLive().some(p => JSON.stringify(p.songs) === JSON.stringify(S.setlist));
+async function saveSetlistAs(){
+  const name = await askName('Guardar setlist como lista'); if (!name) return null;
+  const p = newPlaylist(name, S.setlist); S.plActive = p.id; savePlActive(); renderPlaylists(); toast(`Lista "${name}" guardada.`); return p;
+}
+async function activatePlaylist(id){
+  const p = S.playlists.find(x => x.id === id && !x.del); if (!p) return;
+  if (unsavedSetlist()){
+    const m = await new Promise(res => { const mm = modal(`<div class="mhead"><h2>Setlist sin guardar</h2></div>
+      <div class="mbody">Tu setlist actual (${S.setlist.length} canciones) no está guardado en ninguna lista. ¿Quieres guardarlo antes de abrir "${esc(p.name)}"?</div>
+      <div class="mfoot"><button data-r="c">Cancelar</button><button data-r="n">Abrir sin guardar</button><button class="primary" data-r="s">Guardarlo como lista…</button></div>`, {wide:false});
+      mm.onClose = () => res('c'); mm.el.addEventListener('click', e => { const r = e.target.dataset.r; if (r){ mm.onClose = null; mm.close(); res(r); } }); });
+    if (m === 'c'){ renderPlaylists(); return; }
+    if (m === 's' && !(await saveSetlistAs())){ renderPlaylists(); return; }
+  }
+  S.plActive = p.id; savePlActive();
+  S.setlist = p.songs.filter(x => S.songs.has(x)); saveSetlist(); renderSetlist();
+  if (!DECK_CUR().playing && !S.fading){ if (!S.setlist.includes(S.curId)) await setCurrent(S.setlist[0] || null); else await setCurrent(S.curId); }
+  else { const nd = DECK_NEXT(), nx = nextInSetlist(S.curId); if (!nd.playing) await nd.load(nx ? S.songs.get(nx) : null); renderSetlist(); }
+  toast(`Lista "${p.name}" · ${S.setlist.length} canciones`);
+}
+$('#plSel').onchange = async e => {
+  const v = e.target.value;
+  if (v === '__save'){ await saveSetlistAs(); renderPlaylists(); return; }
+  if (v === '__new'){
+    const name = await askName('Nueva lista', '', 'Crear'); if (!name){ renderPlaylists(); return; }
+    if (unsavedSetlist() && await confirmBox('Tu setlist actual no está guardado. ¿Guardarlo como lista antes?', 'Guardar', 'No')) { if (!(await saveSetlistAs())){ renderPlaylists(); return; } }
+    const p = newPlaylist(name, []); S.plActive = p.id; savePlActive(); S.setlist = []; saveSetlist(); renderSetlist();
+    if (!DECK_CUR().playing) await setCurrent(null);
+    toast(`Lista "${name}" creada. Añade canciones desde la Biblioteca.`); openLibrary(); return;
+  }
+  if (v) activatePlaylist(v); else renderPlaylists();
+};
+function openPlaylists(){
+  const m = modal(`<div class="mhead"><h2>Listas</h2><span class="grow"></span><button class="primary" id="plNew">+ Nueva lista</button></div>
+    <div class="mbody" style="flex-direction:column"><div class="pllist" id="plRows"></div>
+    <p class="muted" style="font-size:12px;margin-top:12px">La lista abierta es tu setlist: lo que añadas, quites u ordenes en el setlist se guarda solo en esa lista. Una misma canción puede estar en varias listas.</p></div>
+    <div class="mfoot"><button class="primary" id="plClose">Listo</button></div>`, {wide:false});
+  const rows = () => {
+    const pls = plLive();
+    $('#plRows', m.el).innerHTML = (unsavedSetlist() ? `<div class="row"><span class="grow"><b>Setlist sin guardar</b> <span class="muted">· ${S.setlist.length} canciones</span></span><button data-a="saveas">💾 Guardar como lista</button></div>` : '')
+      + (pls.length ? pls.map(p => `<div class="row ${p.id === S.plActive ? 'act' : ''}" data-id="${p.id}"><span class="grow"><b>${esc(p.name)}</b> <span class="muted">· ${p.songs.filter(id => S.songs.has(id)).length} canciones</span></span>
+        ${p.id === S.plActive ? '<span class="chip">Abierta</span>' : '<button data-a="open">Abrir</button>'}<button class="ghost" data-a="ren" title="Renombrar">✎</button><button class="ghost" data-a="dup" title="Duplicar">⧉</button><button class="ghost" data-a="del" title="Eliminar">✕</button></div>`).join('')
+        : '<p class="muted">Aún no tienes listas. Arma un setlist y guárdalo, o crea una lista nueva.</p>');
+  };
+  rows();
+  $('#plRows', m.el).onclick = async e => {
+    const a = e.target.dataset.a; if (!a) return;
+    if (a === 'saveas'){ await saveSetlistAs(); return rows(); }
+    const id = e.target.closest('[data-id]').dataset.id, p = S.playlists.find(x => x.id === id);
+    if (a === 'open'){ m.close(); activatePlaylist(id); }
+    if (a === 'ren'){ const n = await askName('Renombrar lista', p.name); if (n){ p.name = n; p.at = Date.now(); savePlaylists(); renderPlaylists(); rows(); } }
+    if (a === 'dup'){ const n = await askName('Duplicar lista', p.name + ' (copia)', 'Duplicar'); if (n){ newPlaylist(n, p.songs); renderPlaylists(); rows(); } }
+    if (a === 'del'){ if (await confirmBox(`¿Eliminar la lista "${p.name}"? Las canciones no se borran de la biblioteca.`, 'Eliminar')){
+      p.del = true; p.songs = []; p.at = Date.now(); if (S.plActive === id){ S.plActive = null; savePlActive(); } savePlaylists(); renderPlaylists(); rows(); } }
+  };
+  $('#plNew', m.el).onclick = async () => { const n = await askName('Nueva lista', '', 'Crear'); if (n){ newPlaylist(n, []); renderPlaylists(); rows(); } };
+  $('#plClose', m.el).onclick = m.close;
+}
+$('#plMenu').onclick = openPlaylists;
+
 /* ================= Cloud sync (Google Drive, carpeta oculta de la app) ================= */
 // Si pegas aquí el "ID de cliente" de Google Cloud, no tendrás que escribirlo en cada equipo.
 const CLOUD_CLIENT_ID = '359001452952-nikj44g2gdnavltdoh9oofn9dn9ibdq7.apps.googleusercontent.com';
 const CLOUD = {
   scope: 'https://www.googleapis.com/auth/drive.appdata',
-  SYNC_KV: {setlist:1, pads:1, settings:1},
-  SYNC_SETTINGS: ['theme', 'notation', 'chordColor', 'lyricColor', 'aiLang', 'aiQuality', 'aiBacking', 'fadeSec', 'autoFade'],
+  SYNC_KV: {setlist:1, pads:1, settings:1, playlists:1, plActive:1},
+  SYNC_SETTINGS: ['theme', 'notation', 'chordColor', 'lyricColor', 'aiLang', 'aiQuality', 'aiBacking', 'fadeSec', 'autoFade', 'hlLine', 'vamp', 'vampBars'],
   m: {enabled:false, clientId:'', user:'', libId:null, ver:null, dirty:false, last:0, tomb:{}, at:{}, up:[], idx:{}},
   tc: null, tok: null, busy: false, again: false, state: 'off', detail: '', timer: null, muted: 0, gcDone: false, dl: null,
   get api(){ return (window.__CLOUD_MOCK && window.__CLOUD_MOCK.api) || 'https://www.googleapis.com'; },
@@ -4753,7 +5142,7 @@ const CLOUD = {
     this.m.enabled = true;
     if (first){ // everything this device already has goes up
       this.m.dirty = true; this.m.ver = null;
-      this.m.at = {setlist: 0, pads: 0, settings: 0};   // what's already in Drive wins; this device's songs are added
+      this.m.at = {setlist: 0, pads: 0, settings: 0, plActive: 0};   // what's already in Drive wins; this device's songs are added
       const ids = this.referencedAssets(); this.m.up = [...new Set([...(this.m.up || []), ...ids])];
       this._join = [...S.setlist];
     }
@@ -4918,7 +5307,8 @@ const CLOUD = {
     const songs = {}; for (const [id, s] of [...S.songs].sort((a, b) => a[0] < b[0] ? -1 : 1)) songs[id] = s;
     const pick = {}; for (const k of this.SYNC_SETTINGS) pick[k] = S.settings[k];
     return {app:'escenario', v:1, songs, tomb: this.m.tomb, setlist:{at: this.m.at.setlist || 0, v: S.setlist}, pads:{at: this.m.at.pads || 0, v: PADS},
-      settings:{at: this.m.at.settings || 0, v: pick}, assets: this.m.idx};
+      settings:{at: this.m.at.settings || 0, v: pick}, assets: this.m.idx,
+      playlists:{v: S.playlists}, plActive:{at: this.m.at.plActive || 0, v: S.plActive}};
   },
   merge(L, R){
     if (!R) return L;
@@ -4936,7 +5326,14 @@ const CLOUD = {
       const ra = r.at || 0, la = l.at || 0;
       if (ra === la && full(l) && !full(r)) return l;   // same age: never let an empty list replace a full one
       return ra >= la ? r : l; };
-    return {app:'escenario', v:1, songs, tomb, setlist: newer('setlist'), pads: newer('pads'), settings: newer('settings'), assets: {...(R.assets || {}), ...L.assets}};
+    const pl = {};   // lists merge one by one: the newest change to each list wins
+    for (const p of [...((R.playlists && R.playlists.v) || []), ...((L.playlists && L.playlists.v) || [])]){
+      if (p.del && (p.at || 0) < cut) continue;
+      const o = pl[p.id]; if (!o || (p.at || 0) > (o.at || 0)) pl[p.id] = p; }
+    const plv = Object.values(pl).sort((a, b) => (a.created || 0) - (b.created || 0) || (a.id < b.id ? -1 : 1));
+    const plSame = L.playlists && JSON.stringify(plv) === JSON.stringify(L.playlists.v);
+    return {app:'escenario', v:1, songs, tomb, setlist: newer('setlist'), pads: newer('pads'), settings: newer('settings'), assets: {...(R.assets || {}), ...L.assets},
+      playlists: plSame ? L.playlists : {v: plv}, plActive: R.plActive ? newer('plActive') : L.plActive};
   },
   async applyLocal(M, L){
     this.muted++;
@@ -4953,7 +5350,10 @@ const CLOUD = {
       if (M.setlist !== L.setlist){ S.setlist = (M.setlist.v || []).filter(id => S.songs.has(id)); this.m.at.setlist = M.setlist.at; await DB.kvSet('setlist', S.setlist); setChanged = true; }
       else if (removed.length){ S.setlist = S.setlist.filter(id => S.songs.has(id)); await DB.kvSet('setlist', S.setlist); }
       if (M.pads !== L.pads){ PADS = (M.pads.v || []).map(p => ({assetId:null, name:'', mode:'oneshot', vol:0.9, ...p})); while (PADS.length < 8) PADS.push({assetId:null, name:'', mode:'oneshot', vol:0.9}); this.m.at.pads = M.pads.at; await DB.kvSet('pads', PADS); renderPads(); }
-      if (M.settings !== L.settings){ Object.assign(S.settings, M.settings.v || {}); this.m.at.settings = M.settings.at; await DB.kvSet('settings', S.settings); applyTheme(); applyColors(); $('#fadeSec').value = S.settings.fadeSec; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; $('#autoFade').checked = S.settings.autoFade; }
+      if (M.settings !== L.settings){ Object.assign(S.settings, M.settings.v || {}); this.m.at.settings = M.settings.at; await DB.kvSet('settings', S.settings); applyTheme(); applyColors(); $('#fadeSec').value = S.settings.fadeSec; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; $('#autoFade').checked = S.settings.autoFade; $('#vampOn').checked = !!S.settings.vamp; }
+      if (M.playlists !== L.playlists){ S.playlists = M.playlists.v; await DB.kvSet('playlists', S.playlists); }
+      if (M.plActive !== L.plActive){ S.plActive = M.plActive.v; this.m.at.plActive = M.plActive.at; await DB.kvSet('plActive', S.plActive); }
+      renderPlaylists();
       // decks
       if (S.curId && !S.songs.has(S.curId)) await setCurrent(S.setlist[0] || null);
       else {
@@ -5056,7 +5456,7 @@ const CLOUD = {
   },
   async init(){   // call after boot has loaded settings, setlist and pads
     await this.loadMeta(); this.hook();
-    this.kvChanged('setlist', S.setlist); this.kvChanged('pads', PADS); this.kvChanged('settings', S.settings);
+    this.kvChanged('setlist', S.setlist); this.kvChanged('pads', PADS); this.kvChanged('settings', S.settings); this.kvChanged('playlists', S.playlists); this.kvChanged('plActive', S.plActive);
     this.renderChip();
     if (!this.m.enabled) return;
     this.setState('idle');
@@ -5117,6 +5517,9 @@ function openSettings(opts){
       <div class="settings">
         <span>Tema</span><select id="sTheme"><option value="auto">Automático (sistema)</option><option value="light">Claro</option><option value="dark">Oscuro</option></select>
         <span>Notación de acordes</span><select id="sNot"><option value="orig">Como viene la canción</option><option value="letter">Americana (C D E)</option><option value="latin">Latina (Do Re Mi)</option></select>
+        <span>Resaltar la línea que se canta</span><select id="sHl"><option value="0">No</option><option value="1">Suave (un poco más grande y gruesa)</option><option value="2">Fuerte (más grande; atenúa las demás)</option></select>
+        <span>Duración del vamp</span><select id="sVamp"><option value="1">1 compás</option><option value="2">2 compases</option><option value="4">4 compases</option></select>
+        <span class="hint">Vamp: al transicionar, la siguiente canción repite unos compases de su intro (o de su ritmo, sin voz) hasta que pises <kbd>T</kbd>; entonces entra a tiempo en el siguiente compás.</span>
         <span>Color de acordes</span><div class="row"><input type="color" id="sChord"><button id="sChordR" class="ghost">Predeterminado</button></div>
         <span>Color de letra</span><div class="row"><input type="color" id="sLyric"><button id="sLyricR" class="ghost">Predeterminado</button></div>
         <span>Idioma de las letras</span><select id="sLang"><option value="spanish">Español</option><option value="english">Inglés</option><option value="portuguese">Portugués</option><option value="auto">Detectar automáticamente</option></select>
@@ -5131,7 +5534,7 @@ function openSettings(opts){
       <h3 style="margin:18px 0 8px;font-size:13px">Atajos de teclado (compatibles con pedales Bluetooth)</h3>
       <div class="keys">
         <kbd>Espacio</kbd><span>Reproducir / pausar la pista actual (y el scroll)</span>
-        <kbd>T</kbd><span>Transicionar a la siguiente canción (también <kbd>→</kbd>)</span>
+        <kbd>T</kbd><span>Transicionar a la siguiente canción (también <kbd>→</kbd>). Con Vamp: la primera vez arranca el loop; la segunda, entra la canción</span>
         <kbd>↓</kbd> <span>/ <kbd>Av Pág</kbd> adelantar el scroll · <kbd>↑</kbd> / <kbd>Re Pág</kbd> retroceder</span>
         <kbd>+</kbd><span>Subir medio tono · <kbd>−</kbd> bajar medio tono</span>
         <kbd>1–4</kbd><span>Looper: grabar / cerrar loop / superponer en la pista 1–4 · <kbd>Mayús</kbd>+<kbd>1–4</kbd> silenciar</span>
@@ -5139,12 +5542,14 @@ function openSettings(opts){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v15</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v17</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
   q('#sTheme').value = st.theme; q('#sNot').value = st.notation; q('#sLat').value = st.latencyMs ?? defaultLatencyMs(); q('#sLatEst').textContent = defaultLatencyMs();
   q('#sTheme').onchange = e => { st.theme = e.target.value; applyTheme(); saveSettings(); };
+  q('#sVamp').value = String(st.vampBars || 2); q('#sVamp').onchange = e => { st.vampBars = +e.target.value; saveSettings(); };
+  q('#sHl').value = String(st.hlLine ?? 1); q('#sHl').onchange = e => { st.hlLine = +e.target.value; applyFont(); saveSettings(); };
   const cs = getComputedStyle(document.documentElement);
   const toHex = c => { const d = document.createElement('div'); d.style.color = c; document.body.appendChild(d); const m = getComputedStyle(d).color.match(/\d+/g); d.remove(); return m ? '#' + m.slice(0,3).map(x => (+x).toString(16).padStart(2,'0')).join('') : '#000000'; };
   q('#sChord').value = st.chordColor || toHex(cs.getPropertyValue('--accent').trim());
@@ -5187,6 +5592,7 @@ $('#btnEdit').onclick = () => { const s = curSong(); s ? openEditor(s) : openEdi
 $('#btnFade').onclick = () => transition();
 $('#fadeSec').oninput = e => { S.settings.fadeSec = +e.target.value; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; saveSettings(); };
 $('#autoFade').onchange = e => { S.settings.autoFade = e.target.checked; saveSettings(); };
+$('#vampOn').onchange = e => { S.settings.vamp = e.target.checked; saveSettings(); };
 $('#btnMic').onclick = () => enableMic(S.settings.micDev);
 $('#micDev').onchange = e => { S.settings.micDev = e.target.value; saveSettings(); $('#btnMic').disabled = false; enableMic(e.target.value); };
 $('#micCh').onchange = e => { S.settings.micCh = e.target.value; saveSettings(); LOOP.node && LOOP.node.port.postMessage({ch:e.target.value}); };
@@ -5241,11 +5647,13 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
   await DB.open();
   const st = await DB.kvGet('settings', null); if (st) Object.assign(S.settings, st);
   applyTheme(); applyFont(); applyFooter(); applyColors();
-  $('#fadeSec').value = S.settings.fadeSec; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; $('#autoFade').checked = S.settings.autoFade;
+  $('#fadeSec').value = S.settings.fadeSec; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; $('#autoFade').checked = S.settings.autoFade; $('#vampOn').checked = !!S.settings.vamp;
   for (const s of await DB.all('songs')) S.songs.set(s.id, s);
   S.setlist = (await DB.kvGet('setlist', [])).filter(id => S.songs.has(id));
   const pads = await DB.kvGet('pads', null); if (pads) PADS = pads.map(p => ({assetId:null, name:'', mode:'oneshot', vol:0.9, ...p}));
+  S.playlists = await DB.kvGet('playlists', []); S.plActive = await DB.kvGet('plActive', null);
   await CLOUD.init();
+  renderPlaylists();
   LOOP.tracks = Array.from({length:4}, (_, i) => ({idx:i, data:null, undo:null, state:'empty', src:null, g:null, vol:0.9}));
   DECKS = [new Deck(0), new Deck(1)];
   renderPads(); renderTracks();
