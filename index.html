@@ -243,7 +243,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v14 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v14</span></div>
+  <div class="brand" title="Escenario v15 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v15</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -4791,7 +4791,16 @@ const CLOUD = {
     }
     return out;
   },
-  async create(name, blob, type){   // new file in the hidden app folder; returns {id, version}
+  xput(url, blob, type, onProg){   // PUT with upload progress (fetch can't report it)
+    return new Promise(res => {
+      const x = new XMLHttpRequest(); x.open('PUT', url); x.setRequestHeader('Content-Type', type);
+      if (onProg) x.upload.onprogress = e => e.lengthComputable && onProg(e.loaded / e.total);
+      x.onload = () => res({status: x.status, ok: x.status >= 200 && x.status < 300, json: async () => JSON.parse(x.responseText || '{}')});
+      x.onerror = x.ontimeout = () => res(null);
+      x.send(blob);
+    });
+  },
+  async create(name, blob, type, onProg){   // new file in the hidden app folder; returns {id, version}
     const meta = {name, parents: ['appDataFolder'], mimeType: type || 'application/octet-stream'};
     const r = await this.d('/upload/drive/v3/files?uploadType=resumable&fields=id,version', {method:'POST',
       headers: {'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': meta.mimeType, 'X-Upload-Content-Length': String(blob.size)}, body: JSON.stringify(meta)});
@@ -4799,9 +4808,9 @@ const CLOUD = {
     const loc = r.headers.get('Location');
     if (loc){
       for (let i = 0; ; i++){
-        let u; try { u = await fetch(loc, {method:'PUT', headers: {'Content-Type': meta.mimeType}, body: blob}); } catch(e){ u = null; }
+        const u = await this.xput(loc, blob, meta.mimeType, onProg);
         if (u && (u.status === 200 || u.status === 201)) return u.json();
-        if (i >= 3 || (u && u.status >= 400 && u.status < 500 && u.status !== 429)) throw u ? await this.err(u) : Object.assign(new Error('Sin conexión'), {offline:true});
+        if (i >= 3 || (u && u.status >= 400 && u.status < 500 && u.status !== 429)) throw u ? new Error('Falló la subida (' + u.status + ')') : Object.assign(new Error('Sin conexión'), {offline:true});
         await new Promise(z => setTimeout(z, 2000 * (i + 1)));
       }
     }
@@ -4836,7 +4845,7 @@ const CLOUD = {
     this._dups = null;
     return res.version;
   },
-  async uploadAsset(id, blob){ const r = await this.create(id, blob, blob.type || 'application/octet-stream'); return r.id; },
+  async uploadAsset(id, blob, onProg){ const r = await this.create(id, blob, blob.type || 'application/octet-stream', onProg); return r.id; },
   async downloadAsset(id){
     const meta = this.m.idx[id]; if (!meta || !meta.gid) return null;
     const r = await this.d('/drive/v3/files/' + meta.gid + '?alt=media');
@@ -4894,7 +4903,8 @@ const CLOUD = {
     };
     DB.get = async (store, key) => {
       const r = await get(store, key);
-      if (r || store !== 'assets' || !this.m.enabled || !this.m.idx[key]) return r;
+      if (r || store !== 'assets' || !this.m.enabled) return r;
+      if (!this.m.idx[key]){ toast('Este audio todavía se está subiendo desde el otro equipo. Prueba en unos minutos.', 4000); return r; }
       try { toast('Descargando audio de Google Drive…', 1800); return await this.fetchAsset(key) || undefined; }
       catch(e){ console.warn(e); if (e.auth) this.setState('auth', e.message); toast('No se pudo descargar el audio de Google Drive: ' + e.message, 4000); return undefined; }
     };
@@ -4964,6 +4974,21 @@ const CLOUD = {
   },
 
   /* ---- the sync loop ---- */
+  // pull, merge, push the library. Drive has no conditional writes; if two devices write at once,
+  // each keeps its own changes locally and re-sends them on the next round.
+  async libRound(){
+    const {item, data, same} = await this.getLibrary();
+    if (same && !this.m.dirty) return;
+    if (data) this.setState('syncing', 'Biblioteca');
+    const L = this.localLib();
+    if (data){ const M = this.merge(L, data); await this.applyLocal(M, L); }
+    if (this._join){ const add = this._join.filter(id => S.songs.has(id) && !S.setlist.includes(id)); this._join = null;
+      if (add.length){ S.setlist.push(...add); saveSetlist(); renderSetlist(); } }
+    const out = this.localLib();
+    if (!same && data && !(this._dups && this._dups.length) && JSON.stringify(out) === JSON.stringify(data)) this.m.ver = item.version;
+    else { this.m.ver = await this.putLibrary(out, item); this.m.remote = {songs: Object.keys(out.songs).length, audio: Object.keys(out.assets).length, copies: 1}; }
+    this.m.dirty = false; await this.saveMeta();
+  },
   async sync({force=false} = {}){
     if (!this.m.enabled) return;
     if (this.busy){ this.again = true; return; }
@@ -4973,34 +4998,27 @@ const CLOUD = {
     try {
       this.token();   // no valid session → ask for a tap instead of failing halfway
       if (this.state !== 'idle' || this.m.dirty || this.m.up.length) this.setState('syncing');
-      // 1) audio first, so the library never points at files that aren't there yet
-      const up = [...this.m.up]; let k = 0;
+      // 1) songs, setlist and pads first, so the other devices see them right away
+      await this.libRound();
+      // 2) then the audio, one file at a time; the library is updated after each one so the other devices can fetch it
+      const up = [...this.m.up]; let k = 0, mb = 0;
+      const total = up.length;
       for (const id of up){
         k++;
         if (this.m.idx[id]){ this.m.up = this.m.up.filter(x => x !== id); continue; }
         const rec = await DB.get('assets', id);
         if (rec && rec.blob && rec.blob.size){
-          this.setState('syncing', `Subiendo audio ${k} de ${up.length} (${(rec.blob.size / 1e6).toFixed(0)} MB)`);
-          const gid = await this.uploadAsset(id, rec.blob);
+          const size = (rec.blob.size / 1e6).toFixed(0);
+          this.setState('syncing', `Subiendo audio ${k} de ${total} (${size} MB)`);
+          let lastP = -1;
+          const gid = await this.uploadAsset(id, rec.blob, p => { const pc = Math.floor(p * 100); if (pc !== lastP){ lastP = pc; this.setState('syncing', `Subiendo audio ${k} de ${total} (${size} MB) · ${pc}%`); } });
           this.m.idx[id] = {name: rec.name || id, type: rec.type || rec.blob.type || '', size: rec.blob.size, gid};
-          this.m.dirty = true;
+          this.m.dirty = true; mb += rec.blob.size;
         }
         this.m.up = this.m.up.filter(x => x !== id); await this.saveMeta();
+        if (this.m.dirty && (mb > 40e6 || k === total) && !this.blocked()){ mb = 0; await this.libRound(); }
       }
-      // 2) pull, merge, push. Drive has no conditional writes; if two devices write at once,
-      //    each keeps its own changes locally and re-sends them on the next round.
-      const {item, data, same} = await this.getLibrary();
-      if (data) this.setState('syncing', 'Biblioteca');
-      if (!(same && !this.m.dirty)){
-        const L = this.localLib();
-        if (data){ const M = this.merge(L, data); await this.applyLocal(M, L); }
-        if (this._join){ const add = this._join.filter(id => S.songs.has(id) && !S.setlist.includes(id)); this._join = null;
-          if (add.length){ S.setlist.push(...add); saveSetlist(); renderSetlist(); } }
-        const out = this.localLib();
-        if (!same && data && !(this._dups && this._dups.length) && JSON.stringify(out) === JSON.stringify(data)) this.m.ver = item.version;
-        else { this.m.ver = await this.putLibrary(out, item); this.m.remote = {songs: Object.keys(out.songs).length, audio: Object.keys(out.assets).length, copies: 1}; }
-        this.m.dirty = false;
-      }
+      if (this.m.dirty && !this.blocked()) await this.libRound();
       this._forcePull = false;
       this.m.last = Date.now(); await this.saveMeta();
       if (!this.gcDone){ this.gcDone = true; this.gcRemote(this.localLib()).catch(e => console.warn('GC', e)); }
@@ -5085,7 +5103,7 @@ function wireCloudSettings(m){
     try { if (CLOUD.m.enabled) await CLOUD.reauth(); else await CLOUD.connect(); upd(); toast('Google Drive conectado. Sincronizando…'); }
     catch(e){ console.warn(e); toast('No se pudo conectar: ' + e.message, 5000); }
   };
-  q('#cSync').onclick = () => { if (CLOUD.state === 'auth') return q('#cConnect').click(); CLOUD.sync({force:true}); };
+  q('#cSync').onclick = () => { if (CLOUD.state === 'auth') return q('#cConnect').click(); if (CLOUD.busy){ toast('Ya está sincronizando' + (CLOUD.detail ? ': ' + CLOUD.detail : '…')); return; } CLOUD.sync({force:true}); };
   q('#cAll').onclick = async () => { toast('Descargando todo el audio de la biblioteca…'); const r = await CLOUD.prefetch(true); toast(r && r.n ? `Descargados ${r.done} de ${r.n} audios.` : 'Ya tienes todo el audio en este equipo.'); };
   q('#cOff').onclick = async () => { if (await confirmBox('¿Desconectar Google Drive en este equipo? Tus canciones se quedan aquí y en Drive; solo deja de sincronizar.', 'Desconectar')){ await CLOUD.disconnect(); upd(); } };
 }
@@ -5121,7 +5139,7 @@ function openSettings(opts){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v14</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v15</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
