@@ -243,7 +243,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v11 · 23-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v11</span></div>
+  <div class="brand" title="Escenario v13 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v13</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -261,6 +261,7 @@ footer.collapsed .fbody{display:none}
     <button id="fUp" title="Letra más grande">A+</button>
   </div>
   <button class="ghost icon" id="btnTheme" title="Modo claro/oscuro" style="font-size:16px">☾</button>
+  <button class="ghost hidden" id="btnCloud" title="Google Drive" style="font-size:13px;white-space:nowrap">☁︎</button>
   <button class="ghost icon" id="btnSettings" title="Ajustes y atajos">⚙</button>
 </header>
 
@@ -4687,8 +4688,408 @@ const Analyzer = {
 };
 function renderLyricsIfCur(id){ if (S.curId === id) renderLyrics(true); }
 
+/* ================= Cloud sync (Google Drive, carpeta oculta de la app) ================= */
+// Si pegas aquí el "ID de cliente" de Google Cloud, no tendrás que escribirlo en cada equipo.
+const CLOUD_CLIENT_ID = '';
+const CLOUD = {
+  scope: 'https://www.googleapis.com/auth/drive.appdata',
+  SYNC_KV: {setlist:1, pads:1, settings:1},
+  SYNC_SETTINGS: ['theme', 'notation', 'chordColor', 'lyricColor', 'aiLang', 'aiQuality', 'aiBacking', 'fadeSec', 'autoFade'],
+  m: {enabled:false, clientId:'', user:'', libId:null, ver:null, dirty:false, last:0, tomb:{}, at:{}, up:[], idx:{}},
+  tc: null, tok: null, busy: false, again: false, state: 'off', detail: '', timer: null, muted: 0, gcDone: false, dl: null,
+  get api(){ return (window.__CLOUD_MOCK && window.__CLOUD_MOCK.api) || 'https://www.googleapis.com'; },
+  get clientId(){ return this.m.clientId || CLOUD_CLIENT_ID; },
+  async loadMeta(){ const m = await DB.kvGet('cloud', null); if (m) this.m = Object.assign(this.m, m); },
+  saveMeta(){ return DB.kvSet('cloud', this.m); },
+  setState(st, detail=''){ this.state = st; this.detail = detail; this.renderChip(); this.onState && this.onState(); },
+  renderChip(){
+    const b = $('#btnCloud'); if (!b) return;
+    b.classList.toggle('hidden', !this.m.enabled);
+    const map = {idle:['☁︎', 'Sincronizado con Google Drive'], syncing:['☁︎ ↻', 'Sincronizando…'], wait:['☁︎ ⏸', 'La sincronización espera a que pares la música'],
+      error:['☁︎ ⚠', 'Error de sincronización'], auth:['☁︎ 🔑', 'Toca para reconectar Google Drive'], offline:['☁︎ ⨯', 'Sin conexión: se sincronizará al volver'], off:['☁︎', '']};
+    const [txt, tip] = map[this.state] || map.off;
+    b.textContent = txt; b.title = tip + (this.detail ? ' · ' + this.detail : '') + (this.m.last ? '\nÚltima sincronización: ' + new Date(this.m.last).toLocaleString() : '');
+    b.dataset.st = this.state;
+  },
+  /* ---- auth (Google Identity Services, token model) ---- */
+  loadGIS(){
+    if (window.__CLOUD_MOCK) return Promise.resolve();
+    if (window.google && google.accounts && google.accounts.oauth2) return Promise.resolve();
+    if (!this._gis) this._gis = new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+      s.onload = res; s.onerror = () => { this._gis = null; rej(Object.assign(new Error('No se pudo cargar el inicio de sesión de Google'), {offline:true})); }; document.head.appendChild(s); });
+    return this._gis;
+  },
+  async prepare(){   // load GIS and build the token client ahead of time, so a click can open the popup right away
+    if (window.__CLOUD_MOCK) return;
+    if (!this.clientId) throw Object.assign(new Error('Falta el ID de cliente'), {auth:true});
+    await this.loadGIS();
+    if (this.tc && this.tc._cid === this.clientId) return;
+    this.tc = google.accounts.oauth2.initTokenClient({client_id: this.clientId, scope: this.scope, prompt: '',
+      callback: r => this._resolve && this._resolve(r), error_callback: e => this._reject && this._reject(e)});
+    this.tc._cid = this.clientId;
+  },
+  ready(){ return !!window.__CLOUD_MOCK || !!(this.tc && this.tc._cid === this.clientId); },
+  interactive(){   // MUST be called synchronously from a click
+    if (window.__CLOUD_MOCK){ this.setTok('mock-token', 3600); return Promise.resolve(); }
+    if (!this.ready()) return Promise.reject(new Error('Aún cargando el inicio de sesión de Google; vuelve a tocar en un segundo'));
+    const p = new Promise((res, rej) => { this._resolve = res; this._reject = rej; });
+    this.tc.requestAccessToken(this.m.email ? {login_hint: this.m.email} : {});
+    return p.then(r => {
+      if (r.error) throw new Error(r.error_description || r.error);
+      if (!google.accounts.oauth2.hasGrantedAllScopes(r, this.scope)) throw new Error('Debes permitir que Escenario guarde sus datos en tu Google Drive');
+      this.setTok(r.access_token, +r.expires_in || 3600);
+    }, e => { throw new Error(e && e.type === 'popup_closed' ? 'Cerraste la ventana de Google' : e && e.type === 'popup_failed_to_open' ? 'El navegador bloqueó la ventana de Google' : 'No se pudo iniciar sesión'); });
+  },
+  setTok(t, sec){ this.tok = {t, exp: Date.now() + sec * 1000}; try { localStorage.setItem('escenario.gtok', JSON.stringify(this.tok)); } catch(e){} },
+  token(){
+    if (!this.tok){ try { this.tok = JSON.parse(localStorage.getItem('escenario.gtok') || 'null'); } catch(e){} }
+    if (this.tok && this.tok.exp - 90000 > Date.now()) return this.tok.t;
+    throw Object.assign(new Error('Toca ☁︎ para reconectar'), {auth:true});
+  },
+  async connect(){   // from a click
+    await this.interactive();
+    try { const a = await this.dj('/drive/v3/about?fields=user(emailAddress,displayName)'); this.m.user = a.user.displayName || a.user.emailAddress; this.m.email = a.user.emailAddress; } catch(e){}
+    const first = !this.m.enabled;
+    this.m.enabled = true;
+    if (first){ // everything this device already has goes up
+      this.m.dirty = true; this.m.ver = null;
+      this.m.at = {setlist: 0, pads: 0, settings: 0};   // what's already in Drive wins; this device's songs are added
+      const ids = this.referencedAssets(); this.m.up = [...new Set([...(this.m.up || []), ...ids])];
+      this._join = [...S.setlist];
+    }
+    await this.saveMeta(); this.renderChip();
+    this.syncSoon(50);
+  },
+  async disconnect(){
+    try { if (this.tok && !window.__CLOUD_MOCK) google.accounts.oauth2.revoke(this.tok.t, () => {}); } catch(e){}
+    this.tok = null; try { localStorage.removeItem('escenario.gtok'); } catch(e){}
+    this.m.enabled = false; this.m.ver = null; this.m.libId = null; this.m.user = ''; this.m.idx = {}; this.m.up = []; this.m.dirty = false; await this.saveMeta();
+    clearTimeout(this.timer); this.setState('off');
+  },
+  async reauth(){ await this.interactive(); this.setState('idle'); this.syncSoon(50); },   // from a click
+
+  /* ---- Drive REST ---- */
+  async d(path, opts={}){
+    for (let i = 0; ; i++){
+      const t = this.token();
+      let r;
+      try { r = await fetch((/^https?:/.test(path) ? '' : this.api) + path, {...opts, headers: {Authorization: 'Bearer ' + t, ...(opts.headers || {})}}); }
+      catch(e){ throw Object.assign(new Error('Sin conexión'), {offline:true}); }
+      if (r.status === 401){ this.tok = null; try { localStorage.removeItem('escenario.gtok'); } catch(e){} throw Object.assign(new Error('La sesión de Google expiró; toca ☁︎'), {auth:true}); }
+      if ((r.status === 429 || r.status >= 500 || (r.status === 403 && /rateLimit/i.test(await r.clone().text()))) && i < 5){
+        await new Promise(z => setTimeout(z, Math.min(30000, (2 ** i) * 1000 + Math.random() * 500))); continue; }
+      return r;
+    }
+  },
+  async dj(path, opts){ const r = await this.d(path, opts); if (!r.ok) throw await this.err(r); return r.status === 204 ? null : r.json(); },
+  async err(r){ let msg = 'Error ' + r.status; try { const j = await r.json(); if (j.error) msg += ': ' + (j.error.message || j.error.status); } catch(e){} return Object.assign(new Error(msg), {status: r.status}); },
+  async list(q, fields='files(id,name,version,modifiedTime,createdTime)'){
+    const out = []; let pt = '';
+    for (let n = 0; n < 30; n++){
+      const j = await this.dj('/drive/v3/files?spaces=appDataFolder&pageSize=1000&orderBy=createdTime&fields=nextPageToken,' + encodeURIComponent(fields) + (q ? '&q=' + encodeURIComponent(q) : '') + (pt ? '&pageToken=' + encodeURIComponent(pt) : ''));
+      out.push(...(j.files || [])); pt = j.nextPageToken; if (!pt) break;
+    }
+    return out;
+  },
+  async create(name, blob, type){   // new file in the hidden app folder; returns {id, version}
+    const meta = {name, parents: ['appDataFolder'], mimeType: type || 'application/octet-stream'};
+    const r = await this.d('/upload/drive/v3/files?uploadType=resumable&fields=id,version', {method:'POST',
+      headers: {'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Type': meta.mimeType, 'X-Upload-Content-Length': String(blob.size)}, body: JSON.stringify(meta)});
+    if (!r.ok) throw await this.err(r);
+    const loc = r.headers.get('Location');
+    if (loc){
+      for (let i = 0; ; i++){
+        let u; try { u = await fetch(loc, {method:'PUT', headers: {'Content-Type': meta.mimeType}, body: blob}); } catch(e){ u = null; }
+        if (u && (u.status === 200 || u.status === 201)) return u.json();
+        if (i >= 3 || (u && u.status >= 400 && u.status < 500 && u.status !== 429)) throw u ? await this.err(u) : Object.assign(new Error('Sin conexión'), {offline:true});
+        await new Promise(z => setTimeout(z, 2000 * (i + 1)));
+      }
+    }
+    // no Location exposed: fall back to a multipart upload
+    const fd = new FormData();
+    fd.append('metadata', new Blob([JSON.stringify(meta)], {type: 'application/json'})); fd.append('file', blob);
+    return this.dj('/upload/drive/v3/files?uploadType=multipart&fields=id,version', {method:'POST', body: fd});
+  },
+  getLibrary: async function(){
+    if (!this.m.libId){
+      const fs = await this.list("name='library.json' and trashed=false");
+      if (!fs.length) return {item: null, data: null};
+      this.m.libId = fs[0].id; this._dups = fs.slice(1).map(f => f.id);
+    }
+    const r = await this.d('/drive/v3/files/' + this.m.libId + '?fields=id,version');
+    if (r.status === 404){ this.m.libId = null; this.m.ver = null; return this.getLibrary(); }
+    if (!r.ok) throw await this.err(r);
+    const item = await r.json();
+    if (item.version === this.m.ver && !this._forcePull) return {item, data: null, same: true};
+    const dl = await this.d('/drive/v3/files/' + item.id + '?alt=media');
+    if (!dl.ok) throw await this.err(dl);
+    let data = await dl.json();
+    for (const id of this._dups || []){   // two devices created library.json at once: fold the extra copies in
+      try { const x = await this.d('/drive/v3/files/' + id + '?alt=media'); if (x.ok) data = this.merge(data, await x.json()); } catch(e){}
+    }
+    return {item, data};
+  },
+  async putLibrary(lib, item){
+    const body = new Blob([JSON.stringify(lib)], {type: 'application/json'});
+    let res;
+    if (item) res = await this.dj('/upload/drive/v3/files/' + item.id + '?uploadType=media&fields=id,version', {method:'PATCH', headers: {'Content-Type': 'application/json'}, body});
+    else res = await this.create('library.json', body, 'application/json');
+    this.m.libId = res.id;
+    for (const id of this._dups || []) await this.d('/drive/v3/files/' + id, {method:'DELETE'}).catch(() => {});
+    this._dups = null;
+    return res.version;
+  },
+  async uploadAsset(id, blob){ const r = await this.create(id, blob, blob.type || 'application/octet-stream'); return r.id; },
+  async downloadAsset(id){
+    const meta = this.m.idx[id]; if (!meta || !meta.gid) return null;
+    const r = await this.d('/drive/v3/files/' + meta.gid + '?alt=media');
+    if (r.status === 404) return null;
+    if (!r.ok) throw await this.err(r);
+    const blob = await r.blob();
+    const rec = {id, name: meta.name || id, type: meta.type || blob.type, blob: meta.type ? new Blob([blob], {type: meta.type}) : blob};
+    this.muted++; try { await DB.put('assets', rec); } finally { this.muted--; }
+    return rec;
+  },
+  fetchAsset(id){   // on demand, de-duplicated
+    this._fa = this._fa || new Map();
+    if (!this._fa.has(id)) this._fa.set(id, this.downloadAsset(id).finally(() => this._fa.delete(id)));
+    return this._fa.get(id);
+  },
+  async gcRemote(lib){
+    const keep = new Set(Object.values(lib.assets || {}).map(a => a.gid));
+    const old = Date.now() - 2 * 864e5;
+    for (const f of await this.list("name contains 'a_' and trashed=false")){
+      if (/^a_/.test(f.name) && !keep.has(f.id) && !(this.m.up || []).includes(f.name) && Date.parse(f.modifiedTime) < old){
+        const r = await this.d('/drive/v3/files/' + f.id, {method:'DELETE'}); if (!r.ok && r.status !== 404) console.warn('No se pudo borrar', f.name);
+      }
+    }
+  },
+
+  /* ---- local change tracking (hooked into DB) ---- */
+  referencedAssets(songs = [...S.songs.values()], pads = PADS){
+    const ids = new Set();
+    for (const s of songs){ if (s.track && s.track.assetId) ids.add(s.track.assetId); if (s.stems) [s.stems.inst, s.stems.voc, s.stems.back].forEach(a => a && ids.add(a)); }
+    for (const p of pads || []) if (p && p.assetId) ids.add(p.assetId);
+    return [...ids];
+  },
+  _last: {},
+  kvStr(k, v){ if (k !== 'settings') return JSON.stringify(v); const p = {}; for (const x of this.SYNC_SETTINGS) p[x] = v[x]; return JSON.stringify(p); },
+  kvChanged(k, v){ const s = this.kvStr(k, v); if (this._last[k] === s) return false; this._last[k] = s; return true; },
+  hook(){
+    const put = DB.put.bind(DB), del = DB.del.bind(DB), get = DB.get.bind(DB);
+    DB.put = (store, val) => {
+      if (!this.muted && this.m.enabled){
+        if (store === 'songs'){ val.updatedAt = Date.now(); this.dirty(); }
+        else if (store === 'assets'){ if (!this.m.idx[val.id] && !this.m.up.includes(val.id)) this.m.up.push(val.id); this.dirty(); }
+        else if (store === 'kv' && this.SYNC_KV[val.k] && this.kvChanged(val.k, val.v)){ this.m.at[val.k] = Date.now(); this.dirty(); }
+      } else {
+        if (!this.muted && store === 'songs') val.updatedAt = Date.now();
+        if (store === 'kv' && this.SYNC_KV[val.k]) this.kvChanged(val.k, val.v);
+      }
+      return put(store, val);
+    };
+    DB.del = (store, key) => {
+      if (!this.muted && this.m.enabled){
+        if (store === 'songs'){ this.m.tomb[key] = Date.now(); this.dirty(); }
+        else if (store === 'assets'){ this.m.up = this.m.up.filter(x => x !== key); }
+      }
+      return del(store, key);
+    };
+    DB.get = async (store, key) => {
+      const r = await get(store, key);
+      if (r || store !== 'assets' || !this.m.enabled || !this.m.idx[key]) return r;
+      try { toast('Descargando audio de Google Drive…', 1800); return await this.fetchAsset(key) || undefined; }
+      catch(e){ console.warn(e); if (e.auth) this.setState('auth', e.message); toast('No se pudo descargar el audio de Google Drive: ' + e.message, 4000); return undefined; }
+    };
+  },
+  dirty(){ this.m.dirty = true; this.saveMeta(); this.syncSoon(4000); },
+  syncSoon(ms=4000){ if (!this.m.enabled) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.sync(), ms); },
+  blocked(){ return DECKS.some(d => d.playing) || S.fading || (typeof CE !== 'undefined' && CE.on); },
+
+  /* ---- merge ---- */
+  localLib(){
+    const songs = {}; for (const [id, s] of [...S.songs].sort((a, b) => a[0] < b[0] ? -1 : 1)) songs[id] = s;
+    const pick = {}; for (const k of this.SYNC_SETTINGS) pick[k] = S.settings[k];
+    return {app:'escenario', v:1, songs, tomb: this.m.tomb, setlist:{at: this.m.at.setlist || 0, v: S.setlist}, pads:{at: this.m.at.pads || 0, v: PADS},
+      settings:{at: this.m.at.settings || 0, v: pick}, assets: this.m.idx};
+  },
+  merge(L, R){
+    if (!R) return L;
+    const tomb = {}, songs = {}, cut = Date.now() - 180 * 864e5;
+    for (const [id, t] of [...Object.entries(R.tomb || {}), ...Object.entries(L.tomb || {})]) if (t > cut) tomb[id] = Math.max(tomb[id] || 0, t);
+    const ids = [...new Set([...Object.keys(L.songs), ...Object.keys(R.songs || {})])].sort();
+    for (const id of ids){
+      const a = L.songs[id], b = (R.songs || {})[id];
+      const best = !a ? b : !b ? a : ((b.updatedAt || 0) > (a.updatedAt || 0) ? b : a);
+      if (tomb[id] && tomb[id] >= (best.updatedAt || 0)) continue;
+      delete tomb[id]; songs[id] = best;
+    }
+    const newer = k => !R[k] ? L[k] : ((R[k].at || 0) >= ((L[k] && L[k].at) || 0) ? R[k] : L[k]);
+    return {app:'escenario', v:1, songs, tomb, setlist: newer('setlist'), pads: newer('pads'), settings: newer('settings'), assets: {...(R.assets || {}), ...L.assets}};
+  },
+  async applyLocal(M, L){
+    this.muted++;
+    try {
+      const changed = new Set(), removed = [];
+      for (const [id, s] of Object.entries(M.songs)) if (L.songs[id] !== s){ S.songs.set(id, s); await DB.put('songs', s); changed.add(id); }
+      for (const id of Object.keys(L.songs)) if (!M.songs[id]){
+        const s = S.songs.get(id); S.songs.delete(id); await DB.del('songs', id); removed.push(id);
+        const still = new Set(this.referencedAssets([...S.songs.values()], M.pads.v));
+        if (s) for (const a of this.referencedAssets([s], [])) if (!still.has(a)){ await DB.del('assets', a); decodedCache.delete(a); }
+      }
+      this.m.tomb = M.tomb; this.m.idx = M.assets;
+      let setChanged = removed.length > 0;
+      if (M.setlist !== L.setlist){ S.setlist = (M.setlist.v || []).filter(id => S.songs.has(id)); this.m.at.setlist = M.setlist.at; await DB.kvSet('setlist', S.setlist); setChanged = true; }
+      else if (removed.length){ S.setlist = S.setlist.filter(id => S.songs.has(id)); await DB.kvSet('setlist', S.setlist); }
+      if (M.pads !== L.pads){ PADS = (M.pads.v || []).map(p => ({assetId:null, name:'', mode:'oneshot', vol:0.9, ...p})); while (PADS.length < 8) PADS.push({assetId:null, name:'', mode:'oneshot', vol:0.9}); this.m.at.pads = M.pads.at; await DB.kvSet('pads', PADS); renderPads(); }
+      if (M.settings !== L.settings){ Object.assign(S.settings, M.settings.v || {}); this.m.at.settings = M.settings.at; await DB.kvSet('settings', S.settings); applyTheme(); applyColors(); $('#fadeSec').value = S.settings.fadeSec; $('#fadeSecVal').textContent = S.settings.fadeSec + 's'; $('#autoFade').checked = S.settings.autoFade; }
+      // decks
+      if (S.curId && !S.songs.has(S.curId)) await setCurrent(S.setlist[0] || null);
+      else {
+        const same = (a, b) => JSON.stringify([a.track, a.stems, a.transpose || 0]) === JSON.stringify([b.track, b.stems, b.transpose || 0]);
+        for (const d of DECKS){
+          if (!d.song || !changed.has(d.song.id)) continue;
+          const ns = S.songs.get(d.song.id);
+          if (same(d.song, ns)){ d.song = ns; d.render(); d.renderVox(); renderMarks(d); } else await d.load(ns);
+        }
+        if (S.curId && changed.has(S.curId)) renderLyrics(true);
+        if (setChanged || changed.size){ const nx = nextInSetlist(S.curId); const nd = DECK_NEXT(); if (!nd.playing && (!nd.song || nd.song.id !== nx) && S.curId) await nd.load(nx ? S.songs.get(nx) : null); }
+      }
+      if (!S.curId && S.setlist[0]) await setCurrent(S.setlist[0]);
+      if (setChanged || changed.size) renderSetlist();
+      if (changed.size || removed.length) this.onLibrary && this.onLibrary();
+      return changed.size + removed.length;
+    } finally { this.muted--; }
+  },
+
+  /* ---- the sync loop ---- */
+  async sync({force=false} = {}){
+    if (!this.m.enabled) return;
+    if (this.busy){ this.again = true; return; }
+    if (!force && this.blocked()){ this.setState('wait'); this.syncSoon(5000); return; }
+    if (!navigator.onLine){ this.setState('offline'); this.syncSoon(30000); return; }
+    this.busy = true; this.again = false; this._forcePull = force;
+    try {
+      this.token();   // no valid session → ask for a tap instead of failing halfway
+      if (this.state !== 'idle' || this.m.dirty || this.m.up.length) this.setState('syncing');
+      // 1) audio first, so the library never points at files that aren't there yet
+      const up = [...this.m.up]; let k = 0;
+      for (const id of up){
+        k++;
+        if (this.m.idx[id]){ this.m.up = this.m.up.filter(x => x !== id); continue; }
+        const rec = await DB.get('assets', id);
+        if (rec && rec.blob && rec.blob.size){
+          this.setState('syncing', `Subiendo audio ${k} de ${up.length} (${(rec.blob.size / 1e6).toFixed(0)} MB)`);
+          const gid = await this.uploadAsset(id, rec.blob);
+          this.m.idx[id] = {name: rec.name || id, type: rec.type || rec.blob.type || '', size: rec.blob.size, gid};
+          this.m.dirty = true;
+        }
+        this.m.up = this.m.up.filter(x => x !== id); await this.saveMeta();
+      }
+      // 2) pull, merge, push. Drive has no conditional writes; if two devices write at once,
+      //    each keeps its own changes locally and re-sends them on the next round.
+      const {item, data, same} = await this.getLibrary();
+      if (data) this.setState('syncing', 'Biblioteca');
+      if (!(same && !this.m.dirty)){
+        const L = this.localLib();
+        if (data){ const M = this.merge(L, data); await this.applyLocal(M, L); }
+        if (this._join){ const add = this._join.filter(id => S.songs.has(id) && !S.setlist.includes(id)); this._join = null;
+          if (add.length){ S.setlist.push(...add); saveSetlist(); renderSetlist(); } }
+        const out = this.localLib();
+        if (!same && data && JSON.stringify(out) === JSON.stringify(data)) this.m.ver = item.version;
+        else this.m.ver = await this.putLibrary(out, item);
+        this.m.dirty = false;
+      }
+      this._forcePull = false;
+      this.m.last = Date.now(); await this.saveMeta();
+      if (!this.gcDone){ this.gcDone = true; this.gcRemote(this.localLib()).catch(e => console.warn('GC', e)); }
+      this.setState('idle');
+      this.prefetch();
+    } catch(e){
+      if (!e.auth) console.warn('Sync', e);
+      if (e.auth) this.setState('auth', e.message);
+      else if (e.offline) { this.setState('offline'); }
+      else this.setState('error', e.message);
+    } finally {
+      this.busy = false;
+      if (this.again) this.syncSoon(500);
+      else if (this.m.enabled) { clearTimeout(this.timer); this.timer = setTimeout(() => this.sync(), this.state === 'idle' ? 60000 : 30000); }
+    }
+  },
+  // keep the setlist (and pads) playable offline: fetch their audio in the background
+  async prefetch(all=false){
+    if (this.dl) return this.dl;
+    this.dl = (async () => {
+      const songs = all ? [...S.songs.values()] : S.setlist.map(id => S.songs.get(id)).filter(Boolean);
+      const ids = this.referencedAssets(songs, PADS).filter(id => this.m.idx[id]);
+      let n = 0, done = 0;
+      for (const id of ids){
+        if (this.blocked() && !all) break;
+        const have = await DB.req('assets', 'readonly', (s, m) => s ? s.getKey(id) : (m.has(id) ? id : undefined));
+        if (have) continue;
+        n++; this.setState('syncing', `Descargando audio ${n}`);
+        try { await this.fetchAsset(id); done++; } catch(e){ console.warn('Descarga', id, e); }
+      }
+      if (n) this.setState('idle', done < n ? `Faltan ${n - done} audios` : '');
+      return {n, done};
+    })().finally(() => { this.dl = null; });
+    return this.dl;
+  },
+  async init(){   // call after boot has loaded settings, setlist and pads
+    await this.loadMeta(); this.hook();
+    this.kvChanged('setlist', S.setlist); this.kvChanged('pads', PADS); this.kvChanged('settings', S.settings);
+    this.renderChip();
+    if (!this.m.enabled) return;
+    this.setState('idle');
+    this.prepare().catch(e => console.warn(e));
+    window.addEventListener('online', () => this.syncSoon(500));
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.syncSoon(800); });
+    this.syncSoon(1500);
+  }
+};
+
+function settingsCloudHTML(){
+  return `<h3 style="margin:18px 0 8px;font-size:13px">Sincronización con Google Drive</h3>
+    <div class="settings" id="cloudBox">
+      <span>Estado</span><div><b id="cState"></b><div class="muted" id="cDetail" style="font-size:12px"></div></div>
+      <span>ID de cliente</span><input id="cId" placeholder="123456789-abc….apps.googleusercontent.com" spellcheck="false" style="font-family:ui-monospace,monospace;font-size:12px">
+      <span class="hint">El "ID de cliente" que creaste en Google Cloud. Origen autorizado: <code id="cOrigin"></code></span>
+      <span></span><div class="row" style="flex-wrap:wrap;gap:6px"><button class="primary" id="cConnect">Conectar con Google Drive</button><button id="cSync">Sincronizar ahora</button><button id="cAll">Descargar todo el audio</button><button class="ghost" id="cOff">Desconectar</button></div>
+      <span class="hint">Se guarda todo (canciones, setlist, pads, colores y audio) en una carpeta oculta de tu Google Drive que solo esta app puede ver; la app no tiene acceso al resto de tus archivos. Las canciones del setlist se descargan solas para tocar sin internet; las demás, al abrirlas. Google pide confirmar la sesión cada hora: si ves 🔑 arriba, tócalo.</span>
+    </div>`;
+}
+function wireCloudSettings(m){
+  const q = x => $(x, m.el);
+  q('#cOrigin').textContent = location.origin;
+  q('#cId').value = CLOUD.clientId;
+  const names = {off:'Desconectado', idle:'Sincronizado ✓', syncing:'Sincronizando…', wait:'En pausa mientras suena la música', error:'Error', auth:'Toca "Reconectar"', offline:'Sin conexión'};
+  const upd = () => {
+    if (!document.body.contains(m.el)) { CLOUD.onState = null; return; }
+    const on = CLOUD.m.enabled;
+    q('#cState').textContent = (names[CLOUD.state] || CLOUD.state) + (on && CLOUD.m.user ? ' · ' + CLOUD.m.user : '');
+    q('#cDetail').textContent = CLOUD.detail + (CLOUD.m.last ? (CLOUD.detail ? ' · ' : '') + 'última: ' + new Date(CLOUD.m.last).toLocaleTimeString() : '');
+    q('#cConnect').classList.toggle('hidden', on && CLOUD.state !== 'auth');
+    q('#cConnect').textContent = on ? 'Reconectar' : 'Conectar con Google Drive';
+    for (const b of ['#cSync', '#cAll', '#cOff']) q(b).classList.toggle('hidden', !on);
+    q('#cId').disabled = on && CLOUD.state !== 'auth';
+  };
+  CLOUD.onState = upd; upd();
+  const prep = () => { if (CLOUD.clientId) CLOUD.prepare().catch(e => toast(e.message, 4000)); };
+  q('#cId').onchange = async e => { CLOUD.m.clientId = e.target.value.trim(); CLOUD.tc = null; await CLOUD.saveMeta(); prep(); };
+  prep();   // preload so the Google window opens straight from the click
+  q('#cConnect').onclick = async () => {
+    if (!CLOUD.clientId && !window.__CLOUD_MOCK){ toast('Pega primero el ID de cliente.'); q('#cId').focus(); return; }
+    try { if (CLOUD.m.enabled) await CLOUD.reauth(); else await CLOUD.connect(); upd(); toast('Google Drive conectado. Sincronizando…'); }
+    catch(e){ console.warn(e); toast('No se pudo conectar: ' + e.message, 5000); }
+  };
+  q('#cSync').onclick = () => { if (CLOUD.state === 'auth') return q('#cConnect').click(); CLOUD.sync({force:true}); };
+  q('#cAll').onclick = async () => { toast('Descargando todo el audio de la biblioteca…'); const r = await CLOUD.prefetch(true); toast(r && r.n ? `Descargados ${r.done} de ${r.n} audios.` : 'Ya tienes todo el audio en este equipo.'); };
+  q('#cOff').onclick = async () => { if (await confirmBox('¿Desconectar Google Drive en este equipo? Tus canciones se quedan aquí y en Drive; solo deja de sincronizar.', 'Desconectar')){ await CLOUD.disconnect(); upd(); } };
+}
+
+
 /* ================= Settings ================= */
-function openSettings(){
+function openSettings(opts){
   const st = S.settings;
   const m = modal(`<div class="mhead"><h2>Ajustes</h2></div>
     <div class="mbody" style="flex-direction:column">
@@ -4705,6 +5106,7 @@ function openSettings(){
         <span>Latencia del looper (ms)</span><input type="number" id="sLat" min="0" max="500" step="1" style="width:110px">
         <span class="hint">Compensa el retraso entre lo que escuchas y lo que se graba. Si las capas quedan "atrasadas", súbela; si quedan "adelantadas", bájala. Valor estimado para este equipo: <b id="sLatEst"></b> ms.</span>
       </div>
+      ${settingsCloudHTML()}
       <h3 style="margin:18px 0 8px;font-size:13px">Atajos de teclado (compatibles con pedales Bluetooth)</h3>
       <div class="keys">
         <kbd>Espacio</kbd><span>Reproducir / pausar la pista actual (y el scroll)</span>
@@ -4716,7 +5118,7 @@ function openSettings(){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v11</b> (23-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>Pistas, letras y sonidos se guardan solo en este navegador. Exporta un respaldo desde la Biblioteca de vez en cuando.<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v13</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
@@ -4739,12 +5141,15 @@ function openSettings(){
   q('#sClearModels').onclick = async () => { try { for (const k of await caches.keys()) await caches.delete(k); toast('Modelos borrados. Se descargarán de nuevo la próxima vez.'); info(); } catch(e){ toast('No se pudieron borrar: ' + e.message); } };
   q('#sNot').onchange = e => { st.notation = e.target.value; saveSettings(); renderLyrics(true); };
   q('#sLat').onchange = e => { st.latencyMs = e.target.value === '' ? null : +e.target.value; saveSettings(); };
+  wireCloudSettings(m);
+  if (opts && opts.cloud) setTimeout(() => q('#cloudBox').scrollIntoView({block:'center'}), 30);
   q('#sClose').onclick = m.close;
 }
 
 /* ================= Wiring ================= */
 $('#btnLib').onclick = openLibrary; $('#btnAddSet').onclick = openLibrary;
-$('#btnSettings').onclick = openSettings;
+$('#btnSettings').onclick = () => openSettings();
+$('#btnCloud').onclick = () => { if (CLOUD.state === 'auth' && CLOUD.ready()) CLOUD.reauth().catch(e => { toast('No se pudo conectar: ' + e.message, 5000); }); else openSettings({cloud:true}); };
 $('#btnTheme').onclick = () => { const cur = document.documentElement.dataset.theme; S.settings.theme = cur === 'dark' ? 'light' : 'dark'; applyTheme(); saveSettings(); };
 $('#tUp').onclick = () => changeTranspose(1); $('#tDown').onclick = () => changeTranspose(-1); $('#tReset').onclick = () => changeTranspose(0);
 $('#capo').innerHTML = Array.from({length:10}, (_, i) => `<option value="${i}">${i}</option>`).join('');
@@ -4819,6 +5224,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
   for (const s of await DB.all('songs')) S.songs.set(s.id, s);
   S.setlist = (await DB.kvGet('setlist', [])).filter(id => S.songs.has(id));
   const pads = await DB.kvGet('pads', null); if (pads) PADS = pads.map(p => ({assetId:null, name:'', mode:'oneshot', vol:0.9, ...p}));
+  await CLOUD.init();
   LOOP.tracks = Array.from({length:4}, (_, i) => ({idx:i, data:null, undo:null, state:'empty', src:null, g:null, vol:0.9}));
   DECKS = [new Deck(0), new Deck(1)];
   renderPads(); renderTracks();
