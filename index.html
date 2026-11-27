@@ -243,7 +243,7 @@ footer.collapsed .fbody{display:none}
 </head>
 <body>
 <header>
-  <div class="brand" title="Escenario v13 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v13</span></div>
+  <div class="brand" title="Escenario v14 · 26-nov-2026"><span class="dot"></span>Escenario <span class="muted" style="font-weight:400;font-size:11px">v14</span></div>
   <button class="ghost" id="btnLib" title="Biblioteca y setlist">☰ Biblioteca</button>
   <div class="songhead"><b id="hTitle">Sin canción</b><span class="muted" id="hArtist"></span></div>
   <div class="group" title="Transponer (acordes y pista de audio)">
@@ -4810,23 +4810,20 @@ const CLOUD = {
     fd.append('metadata', new Blob([JSON.stringify(meta)], {type: 'application/json'})); fd.append('file', blob);
     return this.dj('/upload/drive/v3/files?uploadType=multipart&fields=id,version', {method:'POST', body: fd});
   },
-  getLibrary: async function(){
-    if (!this.m.libId){
-      const fs = await this.list("name='library.json' and trashed=false");
-      if (!fs.length) return {item: null, data: null};
-      this.m.libId = fs[0].id; this._dups = fs.slice(1).map(f => f.id);
-    }
-    const r = await this.d('/drive/v3/files/' + this.m.libId + '?fields=id,version');
-    if (r.status === 404){ this.m.libId = null; this.m.ver = null; return this.getLibrary(); }
-    if (!r.ok) throw await this.err(r);
-    const item = await r.json();
-    if (item.version === this.m.ver && !this._forcePull) return {item, data: null, same: true};
+  async getLibrary(){
+    // always list: if two devices ever created their own library.json, fold them into the oldest one
+    const fs = await this.list("name='library.json' and trashed=false");
+    if (!fs.length){ this.m.libId = null; this._dups = null; return {item: null, data: null}; }
+    const item = fs[0]; this._dups = fs.slice(1).map(f => f.id);
+    if (item.id === this.m.libId && item.version === this.m.ver && !this._dups.length && !this._forcePull) return {item, data: null, same: true};
+    this.m.libId = item.id;
     const dl = await this.d('/drive/v3/files/' + item.id + '?alt=media');
     if (!dl.ok) throw await this.err(dl);
     let data = await dl.json();
-    for (const id of this._dups || []){   // two devices created library.json at once: fold the extra copies in
-      try { const x = await this.d('/drive/v3/files/' + id + '?alt=media'); if (x.ok) data = this.merge(data, await x.json()); } catch(e){}
+    for (const id of this._dups){
+      try { const x = await this.d('/drive/v3/files/' + id + '?alt=media'); if (x.ok) data = this.merge(data, await x.json()); } catch(e){ console.warn('dup', e); }
     }
+    this.m.remote = {songs: Object.keys(data.songs || {}).length, audio: Object.keys(data.assets || {}).length, copies: fs.length};
     return {item, data};
   },
   async putLibrary(lib, item){
@@ -4924,7 +4921,11 @@ const CLOUD = {
       if (tomb[id] && tomb[id] >= (best.updatedAt || 0)) continue;
       delete tomb[id]; songs[id] = best;
     }
-    const newer = k => !R[k] ? L[k] : ((R[k].at || 0) >= ((L[k] && L[k].at) || 0) ? R[k] : L[k]);
+    const full = x => x && (Array.isArray(x.v) ? x.v.some(p => p && (typeof p === 'string' || p.assetId)) : !!x.v);
+    const newer = k => { const r = R[k], l = L[k]; if (!r) return l; if (!l) return r;
+      const ra = r.at || 0, la = l.at || 0;
+      if (ra === la && full(l) && !full(r)) return l;   // same age: never let an empty list replace a full one
+      return ra >= la ? r : l; };
     return {app:'escenario', v:1, songs, tomb, setlist: newer('setlist'), pads: newer('pads'), settings: newer('settings'), assets: {...(R.assets || {}), ...L.assets}};
   },
   async applyLocal(M, L){
@@ -4996,8 +4997,8 @@ const CLOUD = {
         if (this._join){ const add = this._join.filter(id => S.songs.has(id) && !S.setlist.includes(id)); this._join = null;
           if (add.length){ S.setlist.push(...add); saveSetlist(); renderSetlist(); } }
         const out = this.localLib();
-        if (!same && data && JSON.stringify(out) === JSON.stringify(data)) this.m.ver = item.version;
-        else this.m.ver = await this.putLibrary(out, item);
+        if (!same && data && !(this._dups && this._dups.length) && JSON.stringify(out) === JSON.stringify(data)) this.m.ver = item.version;
+        else { this.m.ver = await this.putLibrary(out, item); this.m.remote = {songs: Object.keys(out.songs).length, audio: Object.keys(out.assets).length, copies: 1}; }
         this.m.dirty = false;
       }
       this._forcePull = false;
@@ -5067,7 +5068,9 @@ function wireCloudSettings(m){
     if (!document.body.contains(m.el)) { CLOUD.onState = null; return; }
     const on = CLOUD.m.enabled;
     q('#cState').textContent = (names[CLOUD.state] || CLOUD.state) + (on && CLOUD.m.user ? ' · ' + CLOUD.m.user : '');
-    q('#cDetail').textContent = CLOUD.detail + (CLOUD.m.last ? (CLOUD.detail ? ' · ' : '') + 'última: ' + new Date(CLOUD.m.last).toLocaleTimeString() : '');
+    const rm = CLOUD.m.remote;
+    q('#cDetail').textContent = [CLOUD.detail, CLOUD.m.last ? 'última: ' + new Date(CLOUD.m.last).toLocaleTimeString() : '',
+      on ? `En este equipo: ${S.songs.size} canciones` + (rm ? ` · En Drive: ${rm.songs} canciones, ${rm.audio} audios` : '') + (CLOUD.m.up.length ? ` · ${CLOUD.m.up.length} audios por subir` : '') : ''].filter(Boolean).join(' · ');
     q('#cConnect').classList.toggle('hidden', on && CLOUD.state !== 'auth');
     q('#cConnect').textContent = on ? 'Reconectar' : 'Conectar con Google Drive';
     for (const b of ['#cSync', '#cAll', '#cOff']) q(b).classList.toggle('hidden', !on);
@@ -5118,7 +5121,7 @@ function openSettings(opts){
         <kbd>Esc</kbd><span>Detener pads y silenciar loops</span>
         <kbd>V</kbd><span>Silenciar / activar la voz principal · <kbd>C</kbd> silenciar / activar los coros (canciones analizadas)</span>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v13</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
+      <p class="muted" style="font-size:12px;margin-top:16px"><b>Escenario v14</b> (26-nov-2026). Tras subir una versión nueva a GitHub, recarga con ⌘⇧R para no usar la anterior en caché.<br>${CLOUD.m.enabled ? 'Tus canciones se guardan en este navegador y en tu Google Drive.' : 'Pistas, letras y sonidos se guardan solo en este navegador. Conecta Google Drive (arriba) o exporta un respaldo desde la Biblioteca.'}<br>Cambio de tono: SoundTouch (LGPL 2.1), © Olli Parviainen y colaboradores.</p>
     </div>
     <div class="mfoot"><button class="primary" id="sClose">Listo</button></div>`, {wide:false});
   const q = x => $(x, m.el);
